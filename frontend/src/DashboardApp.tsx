@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Upload, FileText, AlertTriangle, Shield, BarChart3, Search, Users, Settings, ChevronDown, Eye, Download, X, CheckCircle, Clock, AlertCircle, TrendingUp, FileCheck, Database, Activity, Image, Network, MessageSquare, Brain, Layers, GitBranch, Target, Zap, Filter, Calendar, Hash, PieChart, LineChart, Play, RefreshCw, Send, UserPlus, Flag } from 'lucide-react';
+import api, { handleApiError, Paper, Statistics } from './services/api';
 
-const API_URL = 'http://localhost:8001';
+// @ts-ignore - Environment variable from Vite
+const API_URL = import.meta.env.REACT_APP_API_URL || 'http://localhost:8001';
 
 // Main App Component
 const AcademicIntegrityPlatform = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [papers, setPapers] = useState([]);
-  const [statistics, setStatistics] = useState(null);
-  const [selectedPaper, setSelectedPaper] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [papers, setPapers] = useState<Paper[]>([]);
+  const [statistics, setStatistics] = useState<Statistics | null>(null);
+  const [selectedPaper, setSelectedPaper] = useState<Paper | null>(null);
 
   useEffect(() => {
     fetchStatistics();
@@ -18,21 +19,30 @@ const AcademicIntegrityPlatform = () => {
 
   const fetchStatistics = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/statistics/overview`);
-      const data = await response.json();
+      const data = await api.statistics.getOverview();
       setStatistics(data);
     } catch (error) {
       console.error('Failed to fetch statistics:', error);
+      // Set mock data as fallback for demo purposes
+      setStatistics({
+        total_papers: 0,
+        processed_papers: 0,
+        processing_rate: 0,
+        total_anomalies_detected: 0,
+        high_risk_papers: 0,
+        average_processing_time: 'N/A',
+        last_updated: new Date().toISOString()
+      });
     }
   };
 
   const fetchRecentPapers = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/papers/search?limit=10`);
-      const data = await response.json();
+      const data = await api.papers.search({ limit: 10 });
       setPapers(data.results || []);
     } catch (error) {
       console.error('Failed to fetch papers:', error);
+      setPapers([]);
     }
   };
 
