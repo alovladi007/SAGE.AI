@@ -113,7 +113,7 @@ const LandingPage = ({ onGetStarted }: { onGetStarted: () => void }) => {
                 title: 'Statistical Anomalies',
                 description: 'Identify p-hacking and data fabrication',
                 color: 'pink',
-                features: ['GRIM test', 'Benford\'s Law', 'P-value validation']
+                features: ['GRIM test', "Benford's Law", 'P-value validation']
               },
               {
                 icon: TrendingUp,
