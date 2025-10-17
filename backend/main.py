@@ -515,8 +515,8 @@ async def upload_paper(
     db.add(job)
     db.commit()
 
-    # Queue background processing
-    background_tasks.add_task(process_paper, str(paper.id), content)
+    # Queue background processing using sync wrapper
+    background_tasks.add_task(process_paper_wrapper, str(paper.id), content)
 
     return {
         "paper_id": str(paper.id),
@@ -524,6 +524,16 @@ async def upload_paper(
         "status": "queued",
         "message": "Paper uploaded successfully and queued for processing"
     }
+
+def process_paper_wrapper(paper_id: str, content: bytes):
+    """Sync wrapper for async background task"""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(process_paper(paper_id, content))
+    finally:
+        loop.close()
 
 async def process_paper(paper_id: str, content: bytes):
     """Background task to process uploaded paper"""
