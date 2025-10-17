@@ -72,7 +72,7 @@ class Paper(Base):
     error_log = Column(Text)
 
     # Analysis results
-    similarity_checks = relationship("SimilarityCheck", back_populates="source_paper")
+    similarity_checks = relationship("SimilarityCheck", foreign_keys="[SimilarityCheck.source_paper_id]", back_populates="source_paper")
     anomaly_flags = relationship("AnomalyFlag", back_populates="paper")
 
     created_at = Column(DateTime, default=datetime.utcnow)
