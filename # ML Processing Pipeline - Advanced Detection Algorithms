@@ -1,0 +1,1358 @@
+# ML Processing Pipeline - Advanced Detection Algorithms
+# ml_pipeline.py
+
+import numpy as np
+import torch
+import torch.nn as nn
+from sentence_transformers import SentenceTransformer
+from typing import List, Dict, Any, Tuple, Optional
+import hashlib
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import networkx as nx
+from collections import Counter, defaultdict
+import re
+import pandas as pd
+from scipy import stats
+import cv2
+import pytesseract
+from PIL import Image
+import io
+import fitz  # PyMuPDF
+from transformers import AutoTokenizer, AutoModel
+import faiss
+import pickle
+from datetime import datetime
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ============= CONFIGURATION =============
+
+class Config:
+    """ML Pipeline Configuration"""
+    
+    # Model paths
+    SENTENCE_TRANSFORMER_MODEL = "allenai/specter2"  # Academic paper embeddings
+    BERT_MODEL = "allenai/scibert_scivocab_uncased"
+    
+    # Similarity thresholds
+    TEXT_SIMILARITY_THRESHOLD = 0.85
+    SEMANTIC_SIMILARITY_THRESHOLD = 0.75
+    IMAGE_SIMILARITY_THRESHOLD = 0.90
+    
+    # Chunk sizes
+    CHUNK_SIZE = 512  # tokens
+    CHUNK_OVERLAP = 50
+    
+    # Vector database
+    VECTOR_DIM = 768
+    FAISS_INDEX_PATH = "data/faiss_index.bin"
+    
+    # Anomaly detection
+    MIN_P_VALUE = 0.0001
+    MAX_SELF_CITATION_RATIO = 0.3
+    BENFORD_LAW_THRESHOLD = 0.05
+
+# ============= TEXT PROCESSING =============
+
+class AdvancedTextProcessor:
+    """Advanced text processing with academic paper understanding"""
+    
+    def __init__(self):
+        self.tokenizer = AutoTokenizer.from_pretrained(Config.BERT_MODEL)
+        
+    def extract_structured_content(self, pdf_path: str) -> Dict[str, Any]:
+        """Extract structured content from academic PDF"""
+        
+        doc = fitz.open(pdf_path)
+        content = {
+            "metadata": self._extract_metadata(doc),
+            "sections": {},
+            "figures": [],
+            "tables": [],
+            "equations": [],
+            "references": [],
+            "footnotes": []
+        }
+        
+        full_text = ""
+        for page_num, page in enumerate(doc):
+            text = page.get_text()
+            full_text += text
+            
+            # Extract figures
+            image_list = page.get_images()
+            for img_index, img in enumerate(image_list):
+                xref = img[0]
+                pix = fitz.Pixmap(doc, xref)
+                if pix.n - pix.alpha < 4:  # GRAY or RGB
+                    img_data = pix.tobytes("png")
+                    content["figures"].append({
+                        "page": page_num,
+                        "index": img_index,
+                        "data": img_data,
+                        "hash": hashlib.md5(img_data).hexdigest()
+                    })
+                pix = None
+            
+            # Extract tables (using layout analysis)
+            tables = self._extract_tables_from_page(page)
+            content["tables"].extend(tables)
+        
+        # Parse sections using regex patterns
+        content["sections"] = self._parse_sections(full_text)
+        
+        # Extract references
+        content["references"] = self._extract_references(full_text)
+        
+        # Extract mathematical equations
+        content["equations"] = self._extract_equations(full_text)
+        
+        doc.close()
+        return content
+    
+    def _extract_metadata(self, doc) -> Dict[str, Any]:
+        """Extract document metadata"""
+        metadata = doc.metadata
+        return {
+            "title": metadata.get("title", ""),
+            "author": metadata.get("author", ""),
+            "subject": metadata.get("subject", ""),
+            "keywords": metadata.get("keywords", ""),
+            "creator": metadata.get("creator", ""),
+            "producer": metadata.get("producer", ""),
+            "creation_date": metadata.get("creationDate", ""),
+            "modification_date": metadata.get("modDate", ""),
+            "pages": doc.page_count
+        }
+    
+    def _parse_sections(self, text: str) -> Dict[str, str]:
+        """Parse document sections using patterns"""
+        
+        sections = {}
+        section_patterns = {
+            "abstract": r"(?i)\babstract\b[\s\S]*?(?=\b(?:introduction|keywords)\b)",
+            "introduction": r"(?i)\bintroduction\b[\s\S]*?(?=\b(?:method|background|related)\b)",
+            "methodology": r"(?i)\b(?:method|methodology|materials?\s+and\s+methods?)\b[\s\S]*?(?=\b(?:result|experiment)\b)",
+            "results": r"(?i)\bresults?\b[\s\S]*?(?=\b(?:discussion|conclusion)\b)",
+            "discussion": r"(?i)\bdiscussion\b[\s\S]*?(?=\b(?:conclusion|acknowledgment)\b)",
+            "conclusion": r"(?i)\bconclusions?\b[\s\S]*?(?=\b(?:reference|acknowledgment|appendix)\b)",
+        }
+        
+        for section_name, pattern in section_patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                sections[section_name] = match.group(0)[:10000]  # Limit section size
+        
+        return sections
+    
+    def _extract_references(self, text: str) -> List[Dict[str, str]]:
+        """Extract and parse references"""
+        
+        references = []
+        
+        # Find references section
+        ref_pattern = r"(?i)\breferences?\b[\s\S]*$"
+        ref_match = re.search(ref_pattern, text)
+        
+        if ref_match:
+            ref_text = ref_match.group(0)
+            
+            # Parse individual references (simplified)
+            ref_items = re.split(r'\n\s*\[\d+\]|\n\s*\d+\.|^\[\d+\]|^\d+\.', ref_text)
+            
+            for ref in ref_items[1:]:  # Skip the header
+                if len(ref.strip()) > 20:  # Filter out short strings
+                    # Extract author, year, title patterns
+                    year_match = re.search(r'\((\d{4})\)', ref)
+                    
+                    references.append({
+                        "raw_text": ref.strip(),
+                        "year": year_match.group(1) if year_match else None,
+                        "hash": hashlib.md5(ref.encode()).hexdigest()
+                    })
+        
+        return references
+    
+    def _extract_tables_from_page(self, page) -> List[Dict[str, Any]]:
+        """Extract tables from a PDF page"""
+        tables = []
+        
+        # This is a simplified version - in production, use camelot or tabula-py
+        text = page.get_text()
+        
+        # Look for table-like patterns
+        lines = text.split('\n')
+        potential_table = []
+        
+        for line in lines:
+            # Check if line has multiple columns (tabs or multiple spaces)
+            if '\t' in line or '  ' in line:
+                potential_table.append(line)
+            elif potential_table and len(potential_table) > 2:
+                # End of table, process it
+                tables.append({
+                    "content": potential_table,
+                    "rows": len(potential_table),
+                    "hash": hashlib.md5('\n'.join(potential_table).encode()).hexdigest()
+                })
+                potential_table = []
+        
+        return tables
+    
+    def _extract_equations(self, text: str) -> List[str]:
+        """Extract mathematical equations"""
+        
+        equations = []
+        
+        # Look for LaTeX equations
+        latex_patterns = [
+            r'\$\$[\s\S]*?\$\$',  # Display math
+            r'\$[^\$]+\$',  # Inline math
+            r'\\begin{equation}[\s\S]*?\\end{equation}',
+            r'\\begin{align}[\s\S]*?\\end{align}'
+        ]
+        
+        for pattern in latex_patterns:
+            matches = re.findall(pattern, text)
+            equations.extend(matches)
+        
+        return equations
+
+# ============= EMBEDDING GENERATION =============
+
+class EmbeddingEngine:
+    """Generate and manage embeddings for similarity search"""
+    
+    def __init__(self):
+        self.model = SentenceTransformer(Config.SENTENCE_TRANSFORMER_MODEL)
+        self.bert_model = AutoModel.from_pretrained(Config.BERT_MODEL)
+        self.tokenizer = AutoTokenizer.from_pretrained(Config.BERT_MODEL)
+        self.vector_index = None
+        self.load_or_create_index()
+    
+    def load_or_create_index(self):
+        """Load or create FAISS index"""
+        try:
+            self.vector_index = faiss.read_index(Config.FAISS_INDEX_PATH)
+            logger.info("Loaded existing FAISS index")
+        except:
+            self.vector_index = faiss.IndexFlatIP(Config.VECTOR_DIM)  # Inner product
+            logger.info("Created new FAISS index")
+    
+    def generate_paper_embeddings(self, paper_content: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        """Generate multi-level embeddings for a paper"""
+        
+        embeddings = {}
+        
+        # Document-level embedding (title + abstract)
+        doc_text = f"{paper_content.get('title', '')} {paper_content.get('abstract', '')}"
+        embeddings['document'] = self.model.encode(doc_text)
+        
+        # Section-level embeddings
+        sections = paper_content.get('sections', {})
+        for section_name, section_text in sections.items():
+            if section_text:
+                # Chunk long sections
+                chunks = self._chunk_text(section_text)
+                section_embeddings = [self.model.encode(chunk) for chunk in chunks]
+                embeddings[f'section_{section_name}'] = np.mean(section_embeddings, axis=0)
+        
+        # Paragraph-level embeddings for detailed matching
+        embeddings['paragraphs'] = self._generate_paragraph_embeddings(paper_content)
+        
+        return embeddings
+    
+    def _chunk_text(self, text: str, max_length: int = 512) -> List[str]:
+        """Split text into chunks for processing"""
+        
+        tokens = self.tokenizer.tokenize(text)
+        chunks = []
+        
+        for i in range(0, len(tokens), max_length - Config.CHUNK_OVERLAP):
+            chunk_tokens = tokens[i:i + max_length]
+            chunk_text = self.tokenizer.convert_tokens_to_string(chunk_tokens)
+            chunks.append(chunk_text)
+        
+        return chunks
+    
+    def _generate_paragraph_embeddings(self, content: Dict[str, Any]) -> List[np.ndarray]:
+        """Generate embeddings for each paragraph"""
+        
+        paragraphs = []
+        for section in content.get('sections', {}).values():
+            if section:
+                # Split into paragraphs
+                paras = section.split('\n\n')
+                paragraphs.extend([p for p in paras if len(p) > 50])
+        
+        return [self.model.encode(para) for para in paragraphs[:100]]  # Limit to 100 paragraphs
+    
+    def add_to_index(self, paper_id: str, embeddings: Dict[str, np.ndarray]):
+        """Add paper embeddings to FAISS index"""
+        
+        # Add document embedding to index
+        doc_embedding = embeddings.get('document')
+        if doc_embedding is not None:
+            self.vector_index.add(np.array([doc_embedding]))
+        
+        # Save index periodically
+        if self.vector_index.ntotal % 100 == 0:
+            faiss.write_index(self.vector_index, Config.FAISS_INDEX_PATH)
+    
+    def search_similar(self, query_embedding: np.ndarray, k: int = 10) -> List[Tuple[int, float]]:
+        """Search for similar papers using FAISS"""
+        
+        distances, indices = self.vector_index.search(np.array([query_embedding]), k)
+        return list(zip(indices[0], distances[0]))
+
+# ============= SIMILARITY DETECTION =============
+
+class AdvancedSimilarityDetector:
+    """Advanced similarity detection using multiple techniques"""
+    
+    def __init__(self):
+        self.embedding_engine = EmbeddingEngine()
+        self.tfidf_vectorizer = TfidfVectorizer(max_features=10000, stop_words='english')
+    
+    def detect_text_reuse(self, source_text: str, target_text: str) -> Dict[str, Any]:
+        """Detect various forms of text reuse"""
+        
+        results = {
+            "verbatim_matches": self._find_verbatim_matches(source_text, target_text),
+            "paraphrase_matches": self._find_paraphrases(source_text, target_text),
+            "structural_similarity": self._calculate_structural_similarity(source_text, target_text),
+            "semantic_similarity": self._calculate_semantic_similarity(source_text, target_text)
+        }
+        
+        # Calculate overall similarity score
+        verbatim_score = len(results["verbatim_matches"]) / max(len(source_text.split()), 1) * 100
+        paraphrase_score = results["paraphrase_matches"]["score"] if results["paraphrase_matches"] else 0
+        structural_score = results["structural_similarity"]
+        semantic_score = results["semantic_similarity"]
+        
+        results["overall_score"] = (
+            verbatim_score * 0.4 +
+            paraphrase_score * 0.3 +
+            structural_score * 0.15 +
+            semantic_score * 0.15
+        )
+        
+        return results
+    
+    def _find_verbatim_matches(self, source: str, target: str, min_length: int = 30) -> List[Dict[str, Any]]:
+        """Find exact text matches above minimum length"""
+        
+        matches = []
+        source_words = source.split()
+        target_words = target.split()
+        
+        # Use dynamic programming to find longest common substrings
+        n, m = len(source_words), len(target_words)
+        dp = [[0] * (m + 1) for _ in range(n + 1)]
+        
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                if source_words[i-1].lower() == target_words[j-1].lower():
+                    dp[i][j] = dp[i-1][j-1] + 1
+                    
+                    # Check if we found a match of sufficient length
+                    if dp[i][j] >= min_length // 5:  # Approximate word count
+                        match_length = dp[i][j]
+                        source_start = i - match_length
+                        target_start = j - match_length
+                        
+                        matched_text = ' '.join(source_words[source_start:i])
+                        
+                        matches.append({
+                            "source_position": source_start,
+                            "target_position": target_start,
+                            "length": match_length,
+                            "text": matched_text[:200] + "..." if len(matched_text) > 200 else matched_text
+                        })
+        
+        # Remove overlapping matches
+        matches = self._remove_overlapping_matches(matches)
+        
+        return matches
+    
+    def _remove_overlapping_matches(self, matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove overlapping text matches, keeping the longest ones"""
+        
+        if not matches:
+            return []
+        
+        # Sort by length (descending)
+        sorted_matches = sorted(matches, key=lambda x: x['length'], reverse=True)
+        
+        non_overlapping = []
+        used_positions = set()
+        
+        for match in sorted_matches:
+            positions = set(range(match['source_position'], 
+                                match['source_position'] + match['length']))
+            
+            if not positions.intersection(used_positions):
+                non_overlapping.append(match)
+                used_positions.update(positions)
+        
+        return non_overlapping
+    
+    def _find_paraphrases(self, source: str, target: str) -> Dict[str, Any]:
+        """Detect paraphrased content using sentence embeddings"""
+        
+        # Split into sentences
+        source_sentences = re.split(r'[.!?]+', source)
+        target_sentences = re.split(r'[.!?]+', target)
+        
+        # Filter out short sentences
+        source_sentences = [s.strip() for s in source_sentences if len(s.strip()) > 20]
+        target_sentences = [s.strip() for s in target_sentences if len(s.strip()) > 20]
+        
+        if not source_sentences or not target_sentences:
+            return {"score": 0, "matches": []}
+        
+        # Generate embeddings
+        source_embeddings = self.embedding_engine.model.encode(source_sentences)
+        target_embeddings = self.embedding_engine.model.encode(target_sentences)
+        
+        # Calculate similarity matrix
+        similarity_matrix = cosine_similarity(source_embeddings, target_embeddings)
+        
+        # Find high similarity pairs
+        paraphrase_pairs = []
+        threshold = 0.8
+        
+        for i, source_sent in enumerate(source_sentences):
+            for j, target_sent in enumerate(target_sentences):
+                if similarity_matrix[i][j] > threshold:
+                    paraphrase_pairs.append({
+                        "source_sentence": source_sent,
+                        "target_sentence": target_sent,
+                        "similarity": float(similarity_matrix[i][j]),
+                        "source_index": i,
+                        "target_index": j
+                    })
+        
+        # Calculate overall paraphrase score
+        if paraphrase_pairs:
+            avg_similarity = np.mean([p["similarity"] for p in paraphrase_pairs])
+            coverage = len(paraphrase_pairs) / min(len(source_sentences), len(target_sentences))
+            score = avg_similarity * coverage
+        else:
+            score = 0
+        
+        return {
+            "score": score,
+            "matches": paraphrase_pairs[:20]  # Limit to top 20 matches
+        }
+    
+    def _calculate_structural_similarity(self, source: str, target: str) -> float:
+        """Calculate structural similarity based on document organization"""
+        
+        # Extract structural elements
+        source_structure = self._extract_structure(source)
+        target_structure = self._extract_structure(target)
+        
+        # Compare structures
+        similarity_scores = []
+        
+        # Section order similarity
+        if source_structure['sections'] and target_structure['sections']:
+            section_similarity = self._sequence_similarity(
+                source_structure['sections'],
+                target_structure['sections']
+            )
+            similarity_scores.append(section_similarity)
+        
+        # Paragraph length distribution similarity
+        if source_structure['paragraph_lengths'] and target_structure['paragraph_lengths']:
+            para_similarity = self._distribution_similarity(
+                source_structure['paragraph_lengths'],
+                target_structure['paragraph_lengths']
+            )
+            similarity_scores.append(para_similarity)
+        
+        # Citation pattern similarity
+        if source_structure['citation_positions'] and target_structure['citation_positions']:
+            citation_similarity = self._distribution_similarity(
+                source_structure['citation_positions'],
+                target_structure['citation_positions']
+            )
+            similarity_scores.append(citation_similarity)
+        
+        return np.mean(similarity_scores) if similarity_scores else 0.0
+    
+    def _extract_structure(self, text: str) -> Dict[str, Any]:
+        """Extract structural features from text"""
+        
+        structure = {
+            "sections": [],
+            "paragraph_lengths": [],
+            "citation_positions": []
+        }
+        
+        # Find section headers
+        section_pattern = r'^[A-Z][A-Za-z\s]+(?:\n|$)'
+        sections = re.findall(section_pattern, text, re.MULTILINE)
+        structure['sections'] = [s.strip() for s in sections]
+        
+        # Paragraph lengths
+        paragraphs = text.split('\n\n')
+        structure['paragraph_lengths'] = [len(p.split()) for p in paragraphs if p.strip()]
+        
+        # Citation positions (relative to document length)
+        citation_pattern = r'\[[0-9]+\]|\([A-Za-z]+,?\s*\d{4}\)'
+        citations = re.finditer(citation_pattern, text)
+        text_length = len(text)
+        structure['citation_positions'] = [c.start() / text_length for c in citations]
+        
+        return structure
+    
+    def _sequence_similarity(self, seq1: List[str], seq2: List[str]) -> float:
+        """Calculate similarity between two sequences"""
+        
+        from difflib import SequenceMatcher
+        
+        # Normalize sequences
+        seq1_normalized = [s.lower().strip() for s in seq1]
+        seq2_normalized = [s.lower().strip() for s in seq2]
+        
+        matcher = SequenceMatcher(None, seq1_normalized, seq2_normalized)
+        return matcher.ratio()
+    
+    def _distribution_similarity(self, dist1: List[float], dist2: List[float]) -> float:
+        """Calculate similarity between two distributions"""
+        
+        if not dist1 or not dist2:
+            return 0.0
+        
+        # Use Kolmogorov-Smirnov test
+        ks_statistic, p_value = stats.ks_2samp(dist1, dist2)
+        
+        # Convert to similarity score (higher p-value = more similar)
+        return p_value
+    
+    def _calculate_semantic_similarity(self, source: str, target: str) -> float:
+        """Calculate semantic similarity using embeddings"""
+        
+        # Generate embeddings for full texts
+        source_embedding = self.embedding_engine.model.encode(source[:5000])  # Limit length
+        target_embedding = self.embedding_engine.model.encode(target[:5000])
+        
+        # Calculate cosine similarity
+        similarity = cosine_similarity([source_embedding], [target_embedding])[0][0]
+        
+        return float(similarity)
+
+# ============= IMAGE SIMILARITY DETECTION =============
+
+class ImageSimilarityDetector:
+    """Detect similar or manipulated images in papers"""
+    
+    def __init__(self):
+        self.feature_extractor = cv2.ORB_create()
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    
+    def compare_images(self, img1_data: bytes, img2_data: bytes) -> Dict[str, Any]:
+        """Compare two images for similarity"""
+        
+        # Convert bytes to images
+        img1 = self._bytes_to_cv2(img1_data)
+        img2 = self._bytes_to_cv2(img2_data)
+        
+        results = {
+            "pixel_similarity": self._pixel_similarity(img1, img2),
+            "structural_similarity": self._structural_similarity(img1, img2),
+            "feature_similarity": self._feature_similarity(img1, img2),
+            "histogram_similarity": self._histogram_similarity(img1, img2),
+            "perceptual_hash_similarity": self._perceptual_hash_similarity(img1, img2)
+        }
+        
+        # Calculate overall similarity
+        weights = {
+            "pixel_similarity": 0.2,
+            "structural_similarity": 0.3,
+            "feature_similarity": 0.2,
+            "histogram_similarity": 0.15,
+            "perceptual_hash_similarity": 0.15
+        }
+        
+        results["overall_similarity"] = sum(
+            results[key] * weight for key, weight in weights.items()
+        )
+        
+        # Determine if images are likely duplicates or manipulations
+        if results["overall_similarity"] > 0.95:
+            results["assessment"] = "likely_duplicate"
+        elif results["overall_similarity"] > 0.85:
+            results["assessment"] = "possible_manipulation"
+        elif results["overall_similarity"] > 0.70:
+            results["assessment"] = "similar_content"
+        else:
+            results["assessment"] = "different"
+        
+        return results
+    
+    def _bytes_to_cv2(self, img_bytes: bytes) -> np.ndarray:
+        """Convert image bytes to OpenCV format"""
+        
+        img = Image.open(io.BytesIO(img_bytes))
+        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    
+    def _pixel_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate pixel-wise similarity"""
+        
+        # Resize images to same size
+        height = min(img1.shape[0], img2.shape[0])
+        width = min(img1.shape[1], img2.shape[1])
+        
+        img1_resized = cv2.resize(img1, (width, height))
+        img2_resized = cv2.resize(img2, (width, height))
+        
+        # Calculate MSE
+        mse = np.mean((img1_resized - img2_resized) ** 2)
+        
+        # Convert to similarity score (0-1)
+        similarity = 1 / (1 + mse / 255.0)
+        
+        return similarity
+    
+    def _structural_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate structural similarity (SSIM)"""
+        
+        from skimage.metrics import structural_similarity as ssim
+        
+        # Convert to grayscale
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        
+        # Resize to same size
+        height = min(gray1.shape[0], gray2.shape[0])
+        width = min(gray1.shape[1], gray2.shape[1])
+        
+        gray1_resized = cv2.resize(gray1, (width, height))
+        gray2_resized = cv2.resize(gray2, (width, height))
+        
+        score = ssim(gray1_resized, gray2_resized)
+        
+        return score
+    
+    def _feature_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate feature-based similarity using ORB"""
+        
+        # Convert to grayscale
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        
+        # Detect and compute features
+        kp1, des1 = self.feature_extractor.detectAndCompute(gray1, None)
+        kp2, des2 = self.feature_extractor.detectAndCompute(gray2, None)
+        
+        if des1 is None or des2 is None:
+            return 0.0
+        
+        # Match features
+        matches = self.matcher.match(des1, des2)
+        
+        # Calculate similarity based on matched features
+        if len(matches) > 0:
+            similarity = len(matches) / max(len(kp1), len(kp2))
+        else:
+            similarity = 0.0
+        
+        return min(similarity, 1.0)
+    
+    def _histogram_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate histogram similarity"""
+        
+        # Calculate histograms for each channel
+        hist_similarity = []
+        
+        for i in range(3):  # BGR channels
+            hist1 = cv2.calcHist([img1], [i], None, [256], [0, 256])
+            hist2 = cv2.calcHist([img2], [i], None, [256], [0, 256])
+            
+            # Normalize histograms
+            hist1 = cv2.normalize(hist1, hist1).flatten()
+            hist2 = cv2.normalize(hist2, hist2).flatten()
+            
+            # Calculate correlation
+            correlation = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+            hist_similarity.append(correlation)
+        
+        return np.mean(hist_similarity)
+    
+    def _perceptual_hash_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Calculate perceptual hash similarity"""
+        
+        import imagehash
+        
+        # Convert to PIL Image
+        pil_img1 = Image.fromarray(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB))
+        pil_img2 = Image.fromarray(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
+        
+        # Calculate perceptual hashes
+        hash1 = imagehash.average_hash(pil_img1)
+        hash2 = imagehash.average_hash(pil_img2)
+        
+        # Calculate similarity
+        hamming_distance = hash1 - hash2
+        similarity = 1 - (hamming_distance / 64.0)  # 64 bits in hash
+        
+        return similarity
+
+# ============= ANOMALY DETECTION =============
+
+class AdvancedAnomalyDetector:
+    """Detect various types of anomalies in academic papers"""
+    
+    def __init__(self):
+        self.statistical_tests = StatisticalAnomalyDetector()
+        self.citation_analyzer = CitationAnomalyDetector()
+        self.data_validator = DataAnomalyDetector()
+    
+    def comprehensive_anomaly_check(self, paper_content: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """Run comprehensive anomaly detection"""
+        
+        anomalies = {
+            "statistical": [],
+            "citation": [],
+            "data": [],
+            "authorship": [],
+            "methodology": []
+        }
+        
+        # Statistical anomalies
+        if paper_content.get('sections', {}).get('results'):
+            anomalies['statistical'] = self.statistical_tests.check_statistical_reporting(
+                paper_content['sections']['results']
+            )
+        
+        # Citation anomalies
+        if paper_content.get('references'):
+            anomalies['citation'] = self.citation_analyzer.analyze_citations(
+                paper_content['references'],
+                paper_content.get('metadata', {})
+            )
+        
+        # Data anomalies
+        if paper_content.get('tables'):
+            anomalies['data'] = self.data_validator.validate_data_tables(
+                paper_content['tables']
+            )
+        
+        # Authorship anomalies
+        anomalies['authorship'] = self._check_authorship_patterns(paper_content)
+        
+        # Methodology anomalies
+        if paper_content.get('sections', {}).get('methodology'):
+            anomalies['methodology'] = self._check_methodology_issues(
+                paper_content['sections']['methodology']
+            )
+        
+        return anomalies
+    
+    def _check_authorship_patterns(self, content: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Check for unusual authorship patterns"""
+        
+        anomalies = []
+        metadata = content.get('metadata', {})
+        
+        # Check for author name variations
+        authors = metadata.get('authors', [])
+        if authors:
+            # Look for suspicious patterns
+            if len(authors) > 20:
+                anomalies.append({
+                    "type": "excessive_authors",
+                    "severity": "medium",
+                    "description": f"Paper has {len(authors)} authors, which is unusually high",
+                    "value": len(authors)
+                })
+        
+        return anomalies
+    
+    def _check_methodology_issues(self, methodology_text: str) -> List[Dict[str, Any]]:
+        """Check for methodology issues"""
+        
+        anomalies = []
+        
+        # Check for missing essential information
+        essential_terms = ['sample size', 'participants', 'ethics', 'approval', 'consent']
+        missing_terms = []
+        
+        for term in essential_terms:
+            if term not in methodology_text.lower():
+                missing_terms.append(term)
+        
+        if missing_terms:
+            anomalies.append({
+                "type": "missing_methodology_info",
+                "severity": "low",
+                "description": f"Methodology section missing: {', '.join(missing_terms)}",
+                "missing_terms": missing_terms
+            })
+        
+        return anomalies
+
+class StatisticalAnomalyDetector:
+    """Detect statistical anomalies in research papers"""
+    
+    def check_statistical_reporting(self, text: str) -> List[Dict[str, Any]]:
+        """Check for statistical reporting anomalies"""
+        
+        anomalies = []
+        
+        # Check p-values
+        anomalies.extend(self._check_p_values(text))
+        
+        # Check confidence intervals
+        anomalies.extend(self._check_confidence_intervals(text))
+        
+        # Check sample sizes
+        anomalies.extend(self._check_sample_sizes(text))
+        
+        # Check for Benford's Law violations
+        anomalies.extend(self._check_benfords_law(text))
+        
+        # Check for GRIM inconsistencies
+        anomalies.extend(self._check_grim_test(text))
+        
+        return anomalies
+    
+    def _check_p_values(self, text: str) -> List[Dict[str, Any]]:
+        """Check for p-value anomalies"""
+        
+        anomalies = []
+        
+        # Extract p-values
+        p_value_pattern = r'p\s*[=<>]\s*([\d\.]+)'
+        p_values = re.findall(p_value_pattern, text, re.IGNORECASE)
+        
+        for p_str in p_values:
+            try:
+                p = float(p_str)
+                
+                if p > 1.0:
+                    anomalies.append({
+                        "type": "invalid_p_value",
+                        "severity": "critical",
+                        "value": p,
+                        "description": f"P-value {p} exceeds 1.0"
+                    })
+                elif p < Config.MIN_P_VALUE:
+                    anomalies.append({
+                        "type": "suspicious_p_value",
+                        "severity": "medium",
+                        "value": p,
+                        "description": f"P-value {p} is suspiciously small"
+                    })
+                elif abs(p - 0.05) < 0.01:
+                    anomalies.append({
+                        "type": "borderline_p_value",
+                        "severity": "low",
+                        "value": p,
+                        "description": f"P-value {p} is suspiciously close to 0.05"
+                    })
+            except ValueError:
+                pass
+        
+        # Check for p-value distribution
+        if len(p_values) > 10:
+            p_floats = [float(p) for p in p_values if float(p) <= 1.0]
+            if p_floats:
+                # Check if too many p-values are just below 0.05
+                just_below_005 = sum(1 for p in p_floats if 0.04 < p < 0.05)
+                if just_below_005 / len(p_floats) > 0.3:
+                    anomalies.append({
+                        "type": "p_hacking_suspected",
+                        "severity": "high",
+                        "description": "Unusual concentration of p-values just below 0.05"
+                    })
+        
+        return anomalies
+    
+    def _check_confidence_intervals(self, text: str) -> List[Dict[str, Any]]:
+        """Check confidence interval reporting"""
+        
+        anomalies = []
+        
+        # Extract confidence intervals
+        ci_pattern = r'(?:CI|confidence interval)[:\s]*\[?([\d\.\-]+)[,\s]+([\d\.\-]+)\]?'
+        cis = re.findall(ci_pattern, text, re.IGNORECASE)
+        
+        for lower, upper in cis:
+            try:
+                lower_val = float(lower)
+                upper_val = float(upper)
+                
+                if lower_val >= upper_val:
+                    anomalies.append({
+                        "type": "invalid_ci",
+                        "severity": "high",
+                        "description": f"Invalid CI: [{lower_val}, {upper_val}]"
+                    })
+            except ValueError:
+                pass
+        
+        return anomalies
+    
+    def _check_sample_sizes(self, text: str) -> List[Dict[str, Any]]:
+        """Check sample size reporting"""
+        
+        anomalies = []
+        
+        # Extract sample sizes
+        n_pattern = r'n\s*=\s*(\d+)'
+        sample_sizes = re.findall(n_pattern, text, re.IGNORECASE)
+        
+        for n_str in sample_sizes:
+            n = int(n_str)
+            
+            # Check for suspiciously round numbers
+            if n > 100 and n % 100 == 0:
+                anomalies.append({
+                    "type": "round_sample_size",
+                    "severity": "low",
+                    "value": n,
+                    "description": f"Suspiciously round sample size: {n}"
+                })
+        
+        return anomalies
+    
+    def _check_benfords_law(self, text: str) -> List[Dict[str, Any]]:
+        """Check if numerical data follows Benford's Law"""
+        
+        anomalies = []
+        
+        # Extract all numbers
+        numbers = re.findall(r'\b\d+\.?\d*\b', text)
+        
+        if len(numbers) > 30:  # Need sufficient data
+            # Get first digits
+            first_digits = []
+            for num_str in numbers:
+                num_str = num_str.lstrip('0').lstrip('.')
+                if num_str and num_str[0].isdigit():
+                    first_digits.append(int(num_str[0]))
+            
+            if first_digits:
+                # Expected Benford distribution
+                benford = [0.301, 0.176, 0.125, 0.097, 0.079, 0.067, 0.058, 0.051, 0.046]
+                
+                # Observed distribution
+                digit_counts = Counter(first_digits)
+                total = len(first_digits)
+                observed = [digit_counts.get(i, 0) / total for i in range(1, 10)]
+                
+                # Chi-square test
+                chi_square = sum(
+                    (obs - exp) ** 2 / exp 
+                    for obs, exp in zip(observed, benford) 
+                    if exp > 0
+                )
+                
+                # Critical value for p=0.05, df=8
+                if chi_square > 15.507:
+                    anomalies.append({
+                        "type": "benford_law_violation",
+                        "severity": "medium",
+                        "description": "Data distribution doesn't follow Benford's Law",
+                        "chi_square": chi_square
+                    })
+        
+        return anomalies
+    
+    def _check_grim_test(self, text: str) -> List[Dict[str, Any]]:
+        """GRIM test for mean/sample size consistency"""
+        
+        anomalies = []
+        
+        # Look for reported means with sample sizes
+        mean_pattern = r'(?:M|mean)\s*=\s*([\d\.]+).*?n\s*=\s*(\d+)'
+        means = re.findall(mean_pattern, text, re.IGNORECASE | re.DOTALL)
+        
+        for mean_str, n_str in means:
+            try:
+                mean_val = float(mean_str)
+                n = int(n_str)
+                
+                # GRIM test: check if mean is possible given sample size
+                # For integers, mean * n should be close to an integer
+                product = mean_val * n
+                remainder = abs(product - round(product))
+                
+                if remainder > 0.01 and n < 100:  # More strict for small samples
+                    anomalies.append({
+                        "type": "grim_test_failure",
+                        "severity": "high",
+                        "description": f"Mean {mean_val} impossible with n={n}",
+                        "mean": mean_val,
+                        "sample_size": n
+                    })
+            except ValueError:
+                pass
+        
+        return anomalies
+
+class CitationAnomalyDetector:
+    """Detect citation-related anomalies"""
+    
+    def analyze_citations(self, references: List[Dict[str, str]], metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Analyze citation patterns for anomalies"""
+        
+        anomalies = []
+        
+        # Check for excessive self-citation
+        anomalies.extend(self._check_self_citation(references, metadata))
+        
+        # Check for citation rings
+        anomalies.extend(self._check_citation_rings(references))
+        
+        # Check for outdated references
+        anomalies.extend(self._check_reference_age(references))
+        
+        # Check for predatory journal citations
+        anomalies.extend(self._check_predatory_journals(references))
+        
+        return anomalies
+    
+    def _check_self_citation(self, references: List[Dict[str, str]], metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Check for excessive self-citation"""
+        
+        anomalies = []
+        
+        authors = metadata.get('authors', [])
+        if not authors:
+            return anomalies
+        
+        # Count self-citations (simplified - would use better author matching in production)
+        self_citations = 0
+        for ref in references:
+            ref_text = ref.get('raw_text', '').lower()
+            for author in authors:
+                if author.lower() in ref_text:
+                    self_citations += 1
+                    break
+        
+        if references:
+            self_citation_ratio = self_citations / len(references)
+            
+            if self_citation_ratio > Config.MAX_SELF_CITATION_RATIO:
+                anomalies.append({
+                    "type": "excessive_self_citation",
+                    "severity": "medium",
+                    "value": self_citation_ratio,
+                    "description": f"Self-citation rate of {self_citation_ratio:.1%} exceeds threshold"
+                })
+        
+        return anomalies
+    
+    def _check_citation_rings(self, references: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Detect potential citation rings"""
+        
+        anomalies = []
+        
+        # Extract author names from references (simplified)
+        author_counts = Counter()
+        
+        for ref in references:
+            # Simple author extraction (would use proper parsing in production)
+            text = ref.get('raw_text', '')
+            # Look for pattern: LastName, F.
+            authors = re.findall(r'([A-Z][a-z]+),\s*[A-Z]\.', text)
+            author_counts.update(authors)
+        
+        # Check for unusual concentration of citations to specific authors
+        if author_counts:
+            total_citations = sum(author_counts.values())
+            for author, count in author_counts.most_common(5):
+                if count > 5 and count / total_citations > 0.2:
+                    anomalies.append({
+                        "type": "citation_concentration",
+                        "severity": "low",
+                        "description": f"High concentration of citations to {author} ({count} citations)"
+                    })
+        
+        return anomalies
+    
+    def _check_reference_age(self, references: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Check age distribution of references"""
+        
+        anomalies = []
+        
+        years = []
+        current_year = datetime.now().year
+        
+        for ref in references:
+            year = ref.get('year')
+            if year:
+                try:
+                    years.append(int(year))
+                except ValueError:
+                    pass
+        
+        if years:
+            avg_age = current_year - np.mean(years)
+            
+            if avg_age > 15:
+                anomalies.append({
+                    "type": "outdated_references",
+                    "severity": "low",
+                    "description": f"Average reference age is {avg_age:.1f} years"
+                })
+            
+            # Check for suspiciously uniform distribution
+            if len(years) > 10:
+                year_counts = Counter(years)
+                if max(year_counts.values()) / len(years) > 0.3:
+                    anomalies.append({
+                        "type": "reference_year_concentration",
+                        "severity": "low",
+                        "description": "Unusual concentration of references from specific year"
+                    })
+        
+        return anomalies
+    
+    def _check_predatory_journals(self, references: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Check for citations to known predatory journals"""
+        
+        anomalies = []
+        
+        # This would use a database of predatory journals in production
+        predatory_indicators = [
+            'international journal of',
+            'american journal of',
+            'global journal of'
+        ]
+        
+        suspicious_count = 0
+        
+        for ref in references:
+            ref_text = ref.get('raw_text', '').lower()
+            for indicator in predatory_indicators:
+                if indicator in ref_text:
+                    suspicious_count += 1
+                    break
+        
+        if suspicious_count > 3:
+            anomalies.append({
+                "type": "predatory_journal_citations",
+                "severity": "medium",
+                "description": f"Found {suspicious_count} citations to potentially predatory journals"
+            })
+        
+        return anomalies
+
+class DataAnomalyDetector:
+    """Detect anomalies in data tables and figures"""
+    
+    def validate_data_tables(self, tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate data in tables"""
+        
+        anomalies = []
+        
+        for i, table in enumerate(tables):
+            # Check for data consistency
+            table_anomalies = self._check_table_consistency(table)
+            
+            for anomaly in table_anomalies:
+                anomaly['table_index'] = i
+                anomalies.append(anomaly)
+        
+        return anomalies
+    
+    def _check_table_consistency(self, table: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Check consistency within a data table"""
+        
+        anomalies = []
+        
+        # Parse table content
+        content = table.get('content', [])
+        
+        if not content:
+            return anomalies
+        
+        # Try to identify numerical columns
+        numerical_data = []
+        
+        for row in content:
+            numbers = re.findall(r'[\d\.]+', row)
+            if numbers:
+                numerical_data.append([float(n) for n in numbers if '.' in n or len(n) <= 5])
+        
+        if numerical_data:
+            # Check for impossible values
+            for row in numerical_data:
+                for value in row:
+                    # Check percentages
+                    if 0 < value < 1:
+                        pass  # Likely a proportion
+                    elif 100 < value < 1000:
+                        # Could be a percentage > 100
+                        if value > 100 and value < 101:
+                            anomalies.append({
+                                "type": "impossible_percentage",
+                                "severity": "high",
+                                "value": value,
+                                "description": f"Percentage value {value} exceeds 100%"
+                            })
+        
+        return anomalies
+
+# ============= MAIN PIPELINE ORCHESTRATOR =============
+
+class MLPipeline:
+    """Main pipeline orchestrator"""
+    
+    def __init__(self):
+        self.text_processor = AdvancedTextProcessor()
+        self.embedding_engine = EmbeddingEngine()
+        self.similarity_detector = AdvancedSimilarityDetector()
+        self.image_detector = ImageSimilarityDetector()
+        self.anomaly_detector = AdvancedAnomalyDetector()
+        
+        logger.info("ML Pipeline initialized")
+    
+    async def process_paper(self, pdf_path: str, paper_id: str) -> Dict[str, Any]:
+        """Process a paper through the complete ML pipeline"""
+        
+        logger.info(f"Processing paper {paper_id}")
+        
+        # Extract content
+        content = self.text_processor.extract_structured_content(pdf_path)
+        
+        # Generate embeddings
+        embeddings = self.embedding_engine.generate_paper_embeddings(content)
+        
+        # Add to index
+        self.embedding_engine.add_to_index(paper_id, embeddings)
+        
+        # Check for anomalies
+        anomalies = self.anomaly_detector.comprehensive_anomaly_check(content)
+        
+        # Find similar papers
+        similar_papers = self._find_similar_papers(embeddings, content)
+        
+        # Process images
+        image_analysis = self._analyze_images(content.get('figures', []))
+        
+        # Generate risk score
+        risk_score = self._calculate_risk_score(anomalies, similar_papers)
+        
+        return {
+            "paper_id": paper_id,
+            "processing_status": "completed",
+            "content_extracted": True,
+            "embeddings_generated": True,
+            "anomalies": anomalies,
+            "similar_papers": similar_papers,
+            "image_analysis": image_analysis,
+            "risk_score": risk_score,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    def _find_similar_papers(self, embeddings: Dict[str, np.ndarray], content: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Find papers similar to the current one"""
+        
+        similar_papers = []
+        
+        # Search using document embedding
+        doc_embedding = embeddings.get('document')
+        if doc_embedding is not None:
+            similar_indices = self.embedding_engine.search_similar(doc_embedding, k=20)
+            
+            for idx, score in similar_indices:
+                similar_papers.append({
+                    "index": int(idx),
+                    "similarity_score": float(score),
+                    "type": "semantic"
+                })
+        
+        return similar_papers
+    
+    def _analyze_images(self, figures: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze images in the paper"""
+        
+        results = {
+            "total_figures": len(figures),
+            "duplicates_found": [],
+            "manipulations_suspected": []
+        }
+        
+        # Compare all pairs of images
+        for i in range(len(figures)):
+            for j in range(i + 1, len(figures)):
+                similarity = self.image_detector.compare_images(
+                    figures[i]['data'],
+                    figures[j]['data']
+                )
+                
+                if similarity['assessment'] == 'likely_duplicate':
+                    results['duplicates_found'].append({
+                        "figure_1": i,
+                        "figure_2": j,
+                        "similarity": similarity['overall_similarity']
+                    })
+                elif similarity['assessment'] == 'possible_manipulation':
+                    results['manipulations_suspected'].append({
+                        "figure_1": i,
+                        "figure_2": j,
+                        "similarity": similarity['overall_similarity']
+                    })
+        
+        return results
+    
+    def _calculate_risk_score(self, anomalies: Dict[str, List], similar_papers: List[Dict]) -> float:
+        """Calculate overall risk score"""
+        
+        score = 0.0
+        
+        # Weight different anomaly types
+        weights = {
+            'statistical': 0.3,
+            'citation': 0.2,
+            'data': 0.25,
+            'authorship': 0.15,
+            'methodology': 0.1
+        }
+        
+        for anomaly_type, anomaly_list in anomalies.items():
+            if anomaly_list:
+                severity_scores = {
+                    'low': 0.25,
+                    'medium': 0.5,
+                    'high': 0.75,
+                    'critical': 1.0
+                }
+                
+                type_score = 0
+                for anomaly in anomaly_list:
+                    severity = anomaly.get('severity', 'low')
+                    type_score += severity_scores.get(severity, 0.25)
+                
+                # Normalize by number of anomalies (with diminishing returns)
+                type_score = min(1.0, type_score / (len(anomaly_list) ** 0.5))
+                
+                score += type_score * weights.get(anomaly_type, 0.1)
+        
+        # Add similarity component
+        if similar_papers:
+            max_similarity = max(p['similarity_score'] for p in similar_papers[:5])
+            score = max(score, max_similarity * 0.8)  # High similarity is strong signal
+        
+        return min(1.0, score)
+
+# ============= EXPORT PIPELINE =============
+
+if __name__ == "__main__":
+    # Example usage
+    pipeline = MLPipeline()
+    
+    # This would be called by the FastAPI backend
+    # result = asyncio.run(pipeline.process_paper("example.pdf", "paper-123"))
+    # print(result)
