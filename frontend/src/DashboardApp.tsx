@@ -1,0 +1,939 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { Upload, FileText, AlertTriangle, Shield, BarChart3, Search, Users, Settings, ChevronDown, Eye, Download, X, CheckCircle, Clock, AlertCircle, TrendingUp, FileCheck, Database, Activity } from 'lucide-react';
+
+const API_URL = 'http://localhost:8001';
+
+// Main App Component
+const AcademicIntegrityPlatform = () => {
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [papers, setPapers] = useState([]);
+  const [statistics, setStatistics] = useState(null);
+  const [selectedPaper, setSelectedPaper] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetchStatistics();
+    fetchRecentPapers();
+  }, []);
+
+  const fetchStatistics = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/statistics/overview`);
+      const data = await response.json();
+      setStatistics(data);
+    } catch (error) {
+      console.error('Failed to fetch statistics:', error);
+    }
+  };
+
+  const fetchRecentPapers = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/papers/search?limit=10`);
+      const data = await response.json();
+      setPapers(data.results || []);
+    } catch (error) {
+      console.error('Failed to fetch papers:', error);
+    }
+  };
+
+  const renderContent = () => {
+    switch(activeTab) {
+      case 'dashboard':
+        return <Dashboard statistics={statistics} papers={papers} />;
+      case 'upload':
+        return <UploadSection onUploadSuccess={fetchRecentPapers} />;
+      case 'search':
+        return <SearchSection papers={papers} setPapers={setPapers} setSelectedPaper={setSelectedPaper} />;
+      case 'analysis':
+        return <AnalysisSection selectedPaper={selectedPaper} />;
+      case 'reports':
+        return <ReportsSection papers={papers} />;
+      default:
+        return <Dashboard statistics={statistics} papers={papers} />;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b">
+        <div className="px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <Shield className="w-8 h-8 text-indigo-600" />
+              <h1 className="text-2xl font-bold text-gray-900">Academic Integrity Platform</h1>
+            </div>
+            <div className="flex items-center space-x-4">
+              <span className="text-sm text-gray-600">Institution: Demo University</span>
+              <button className="p-2 rounded-lg hover:bg-gray-100">
+                <Settings className="w-5 h-5 text-gray-600" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Navigation */}
+      <nav className="bg-white border-b">
+        <div className="px-6">
+          <div className="flex space-x-8">
+            {[
+              { id: 'dashboard', label: 'Dashboard', icon: BarChart3 },
+              { id: 'upload', label: 'Upload', icon: Upload },
+              { id: 'search', label: 'Search', icon: Search },
+              { id: 'analysis', label: 'Analysis', icon: FileCheck },
+              { id: 'reports', label: 'Reports', icon: FileText }
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center space-x-2 px-1 py-4 border-b-2 transition-colors ${
+                  activeTab === tab.id
+                    ? 'border-indigo-600 text-indigo-600'
+                    : 'border-transparent text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <tab.icon className="w-5 h-5" />
+                <span className="font-medium">{tab.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </nav>
+
+      {/* Main Content */}
+      <main className="p-6">
+        {renderContent()}
+      </main>
+    </div>
+  );
+};
+
+// Dashboard Component
+const Dashboard = ({ statistics, papers }) => {
+  const stats = statistics || {
+    total_papers: 0,
+    processed_papers: 0,
+    processing_rate: 0,
+    total_anomalies_detected: 0,
+    high_risk_papers: 0
+  };
+
+  const getRiskColor = (score) => {
+    if (score >= 0.7) return 'text-red-600 bg-red-100';
+    if (score >= 0.4) return 'text-yellow-600 bg-yellow-100';
+    return 'text-green-600 bg-green-100';
+  };
+
+  const getRiskLabel = (score) => {
+    if (score >= 0.7) return 'High Risk';
+    if (score >= 0.4) return 'Medium Risk';
+    return 'Low Risk';
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Statistics Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard
+          title="Total Papers"
+          value={stats.total_papers}
+          icon={Database}
+          color="blue"
+        />
+        <StatCard
+          title="Processed"
+          value={stats.processed_papers}
+          icon={CheckCircle}
+          color="green"
+        />
+        <StatCard
+          title="Anomalies Detected"
+          value={stats.total_anomalies_detected}
+          icon={AlertTriangle}
+          color="yellow"
+        />
+        <StatCard
+          title="High Risk Papers"
+          value={stats.high_risk_papers}
+          icon={AlertCircle}
+          color="red"
+        />
+      </div>
+
+      {/* Processing Overview */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-lg font-semibold mb-4">Processing Overview</h2>
+        <div className="space-y-4">
+          <div>
+            <div className="flex justify-between text-sm mb-2">
+              <span>Processing Rate</span>
+              <span>{(stats.processing_rate * 100).toFixed(1)}%</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div
+                className="bg-indigo-600 h-2 rounded-full transition-all duration-500"
+                style={{ width: `${stats.processing_rate * 100}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mt-4">
+            <div className="flex items-center space-x-2">
+              <Activity className="w-5 h-5 text-gray-400" />
+              <span className="text-sm text-gray-600">Avg. Processing Time: 2.3 min</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Clock className="w-5 h-5 text-gray-400" />
+              <span className="text-sm text-gray-600">Last Update: Just now</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Recent Papers */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="px-6 py-4 border-b">
+          <h2 className="text-lg font-semibold">Recent Papers</h2>
+        </div>
+        <div className="divide-y">
+          {papers.slice(0, 5).map((paper, index) => (
+            <div key={index} className="px-6 py-4 hover:bg-gray-50 transition-colors">
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <h3 className="font-medium text-gray-900">{paper.title}</h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {paper.authors?.join(', ')}
+                  </p>
+                  <div className="flex items-center space-x-4 mt-2">
+                    <span className="text-xs text-gray-500">{paper.journal || 'No journal'}</span>
+                    <span className="text-xs text-gray-500">
+                      {paper.publication_date ? new Date(paper.publication_date).toLocaleDateString() : 'No date'}
+                    </span>
+                  </div>
+                </div>
+                <div className="ml-4">
+                  <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getRiskColor(paper.risk_score || 0)}`}>
+                    {getRiskLabel(paper.risk_score || 0)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Statistics Card Component
+const StatCard = ({ title, value, icon: Icon, color }) => {
+  const colorClasses = {
+    blue: 'bg-blue-100 text-blue-600',
+    green: 'bg-green-100 text-green-600',
+    yellow: 'bg-yellow-100 text-yellow-600',
+    red: 'bg-red-100 text-red-600'
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm text-gray-600">{title}</p>
+          <p className="text-2xl font-bold mt-1">{value.toLocaleString()}</p>
+        </div>
+        <div className={`p-3 rounded-lg ${colorClasses[color]}`}>
+          <Icon className="w-6 h-6" />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Upload Section Component
+const UploadSection = ({ onUploadSuccess }) => {
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setUploading(true);
+    setUploadedFile(file);
+    setUploadProgress(0);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      // Simulate upload progress
+      const progressInterval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev >= 90) {
+            clearInterval(progressInterval);
+            return 90;
+          }
+          return prev + 10;
+        });
+      }, 200);
+
+      const response = await fetch(`${API_URL}/api/papers/upload`, {
+        method: 'POST',
+        body: formData
+      });
+
+      clearInterval(progressInterval);
+      setUploadProgress(100);
+
+      const data = await response.json();
+      setJobStatus(data);
+
+      if (data.job_id) {
+        pollJobStatus(data.job_id);
+      }
+
+      if (onUploadSuccess) {
+        onUploadSuccess();
+      }
+    } catch (error) {
+      console.error('Upload failed:', error);
+      alert('Upload failed. Please try again.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const pollJobStatus = async (jobId) => {
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/jobs/${jobId}/status`);
+        const data = await response.json();
+
+        setJobStatus(data);
+
+        if (data.status === 'completed' || data.status === 'failed') {
+          clearInterval(interval);
+        }
+      } catch (error) {
+        console.error('Failed to fetch job status:', error);
+        clearInterval(interval);
+      }
+    }, 2000);
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto">
+      <div className="bg-white rounded-lg shadow-lg p-8">
+        <h2 className="text-2xl font-bold mb-6">Upload Paper for Analysis</h2>
+
+        {/* Upload Area */}
+        <div className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center hover:border-indigo-500 transition-colors">
+          <Upload className="w-16 h-16 mx-auto text-gray-400 mb-4" />
+          <h3 className="text-lg font-medium mb-2">Drop your PDF here or click to browse</h3>
+          <p className="text-gray-600 mb-4">Supports PDF and TXT files up to 50MB</p>
+
+          <input
+            type="file"
+            accept=".pdf,.txt"
+            onChange={handleFileUpload}
+            className="hidden"
+            id="file-upload"
+            disabled={uploading}
+          />
+          <label
+            htmlFor="file-upload"
+            className="inline-flex items-center px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 cursor-pointer transition-colors"
+          >
+            Select File
+          </label>
+        </div>
+
+        {/* Upload Progress */}
+        {uploading && (
+          <div className="mt-6">
+            <div className="flex items-center justify-between text-sm mb-2">
+              <span className="font-medium">{uploadedFile?.name}</span>
+              <span>{uploadProgress}%</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div
+                className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Job Status */}
+        {jobStatus && (
+          <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                {jobStatus.status === 'completed' ? (
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                ) : jobStatus.status === 'failed' ? (
+                  <AlertCircle className="w-5 h-5 text-red-600" />
+                ) : (
+                  <Clock className="w-5 h-5 text-yellow-600 animate-pulse" />
+                )}
+                <div>
+                  <p className="font-medium">
+                    {jobStatus.status === 'completed' ? 'Analysis Complete' :
+                     jobStatus.status === 'failed' ? 'Analysis Failed' :
+                     'Processing...'}
+                  </p>
+                  <p className="text-sm text-gray-600">
+                    Paper ID: {jobStatus.paper_id}
+                  </p>
+                </div>
+              </div>
+              {jobStatus.status === 'completed' && (
+                <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                  View Results
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Recent Uploads */}
+        <div className="mt-8">
+          <h3 className="font-semibold mb-4">Processing Queue</h3>
+          <div className="space-y-2">
+            {[
+              { name: 'Research_Paper_2024.pdf', status: 'processing', progress: 65 },
+              { name: 'Thesis_Chapter_3.pdf', status: 'queued', progress: 0 },
+              { name: 'Literature_Review.pdf', status: 'completed', progress: 100 }
+            ].map((item, index) => (
+              <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                <div className="flex items-center space-x-3">
+                  <FileText className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm font-medium">{item.name}</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  {item.status === 'completed' ? (
+                    <CheckCircle className="w-5 h-5 text-green-600" />
+                  ) : item.status === 'processing' ? (
+                    <div className="flex items-center space-x-2">
+                      <div className="w-24 bg-gray-200 rounded-full h-2">
+                        <div
+                          className="bg-blue-600 h-2 rounded-full"
+                          style={{ width: `${item.progress}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-gray-600">{item.progress}%</span>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-gray-600">Queued</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Search Section Component
+const SearchSection = ({ papers, setPapers, setSelectedPaper }) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filters, setFilters] = useState({
+    author: '',
+    journal: '',
+    minRisk: 0,
+    startDate: '',
+    endDate: ''
+  });
+  const [searching, setSearching] = useState(false);
+
+  const handleSearch = async () => {
+    setSearching(true);
+
+    try {
+      const params = new URLSearchParams();
+      if (searchQuery) params.append('query', searchQuery);
+      if (filters.author) params.append('author', filters.author);
+      if (filters.journal) params.append('journal', filters.journal);
+      if (filters.minRisk > 0) params.append('min_risk_score', filters.minRisk);
+      if (filters.startDate) params.append('start_date', filters.startDate);
+      if (filters.endDate) params.append('end_date', filters.endDate);
+
+      const response = await fetch(`${API_URL}/api/papers/search?${params}`);
+      const data = await response.json();
+      setPapers(data.results || []);
+    } catch (error) {
+      console.error('Search failed:', error);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Search Bar */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <div className="space-y-4">
+          <div className="flex space-x-4">
+            <div className="flex-1">
+              <input
+                type="text"
+                placeholder="Search papers by title, abstract, or content..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <button
+              onClick={handleSearch}
+              disabled={searching}
+              className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {searching ? 'Searching...' : 'Search'}
+            </button>
+          </div>
+
+          {/* Filters */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <input
+              type="text"
+              placeholder="Author"
+              value={filters.author}
+              onChange={(e) => setFilters({...filters, author: e.target.value})}
+              className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <input
+              type="text"
+              placeholder="Journal"
+              value={filters.journal}
+              onChange={(e) => setFilters({...filters, journal: e.target.value})}
+              className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <select
+              value={filters.minRisk}
+              onChange={(e) => setFilters({...filters, minRisk: parseFloat(e.target.value)})}
+              className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="0">All Risk Levels</option>
+              <option value="0.3">Low Risk & Above</option>
+              <option value="0.6">Medium Risk & Above</option>
+              <option value="0.8">High Risk Only</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Search Results */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="px-6 py-4 border-b">
+          <h2 className="text-lg font-semibold">
+            Search Results ({papers.length} papers found)
+          </h2>
+        </div>
+        <div className="divide-y max-h-96 overflow-y-auto">
+          {papers.map((paper, index) => (
+            <div
+              key={index}
+              className="px-6 py-4 hover:bg-gray-50 cursor-pointer transition-colors"
+              onClick={() => setSelectedPaper(paper)}
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <h3 className="font-medium text-gray-900">{paper.title}</h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {paper.authors?.join(', ')}
+                  </p>
+                  {paper.abstract && (
+                    <p className="text-sm text-gray-500 mt-2 line-clamp-2">
+                      {paper.abstract}
+                    </p>
+                  )}
+                  <div className="flex items-center space-x-4 mt-2">
+                    <span className="text-xs text-gray-500">{paper.journal || 'No journal'}</span>
+                    <span className="text-xs text-gray-500">
+                      {paper.publication_date ? new Date(paper.publication_date).toLocaleDateString() : 'No date'}
+                    </span>
+                  </div>
+                </div>
+                <div className="ml-4 flex flex-col items-end space-y-2">
+                  <RiskBadge score={paper.risk_score || 0} />
+                  <button className="text-indigo-600 hover:text-indigo-800 text-sm font-medium">
+                    View Details →
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Analysis Section Component
+const AnalysisSection = ({ selectedPaper }) => {
+  const [analysisData, setAnalysisData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState('overview');
+
+  useEffect(() => {
+    if (selectedPaper) {
+      fetchAnalysisData();
+    }
+  }, [selectedPaper]);
+
+  const fetchAnalysisData = async () => {
+    if (!selectedPaper?.paper_id) return;
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_URL}/api/papers/${selectedPaper.paper_id}/analyze`);
+      const data = await response.json();
+      setAnalysisData(data);
+    } catch (error) {
+      console.error('Failed to fetch analysis:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!selectedPaper) {
+    return (
+      <div className="bg-white rounded-lg shadow p-12 text-center">
+        <FileCheck className="w-16 h-16 mx-auto text-gray-400 mb-4" />
+        <h3 className="text-lg font-medium text-gray-900 mb-2">No Paper Selected</h3>
+        <p className="text-gray-600">Select a paper from the search results to view detailed analysis</p>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-lg shadow p-12 text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+        <p className="mt-4 text-gray-600">Loading analysis...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Paper Header */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-xl font-bold mb-2">{selectedPaper.title}</h2>
+        <p className="text-gray-600 mb-4">{selectedPaper.authors?.join(', ')}</p>
+        <div className="flex items-center space-x-6">
+          <RiskMeter score={analysisData?.overall_risk_score || 0} />
+          <div className="flex space-x-4">
+            <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+              <Download className="w-4 h-4 inline mr-2" />
+              Download Report
+            </button>
+            <button className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+              <Eye className="w-4 h-4 inline mr-2" />
+              View PDF
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Analysis Tabs */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="border-b">
+          <div className="px-6 flex space-x-8">
+            {['overview', 'similarity', 'anomalies', 'recommendations'].map(tab => (
+              <button
+                key={tab}
+                onClick={() => setActiveAnalysisTab(tab)}
+                className={`py-4 px-1 border-b-2 font-medium text-sm capitalize transition-colors ${
+                  activeAnalysisTab === tab
+                    ? 'border-indigo-600 text-indigo-600'
+                    : 'border-transparent text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-6">
+          {activeAnalysisTab === 'overview' && (
+            <AnalysisOverview analysisData={analysisData} />
+          )}
+          {activeAnalysisTab === 'similarity' && (
+            <SimilarityFindings findings={analysisData?.similarity_findings || []} />
+          )}
+          {activeAnalysisTab === 'anomalies' && (
+            <AnomalyFindings findings={analysisData?.anomaly_findings || []} />
+          )}
+          {activeAnalysisTab === 'recommendations' && (
+            <Recommendations recommendations={analysisData?.recommendations || []} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Analysis Overview Component
+const AnalysisOverview = ({ analysisData }) => {
+  if (!analysisData) return null;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-3 gap-6">
+        <div className="text-center">
+          <p className="text-sm text-gray-600 mb-2">Overall Risk Score</p>
+          <p className="text-3xl font-bold text-indigo-600">
+            {(analysisData.overall_risk_score * 100).toFixed(1)}%
+          </p>
+        </div>
+        <div className="text-center">
+          <p className="text-sm text-gray-600 mb-2">Similar Papers Found</p>
+          <p className="text-3xl font-bold text-gray-900">
+            {analysisData.similarity_findings?.length || 0}
+          </p>
+        </div>
+        <div className="text-center">
+          <p className="text-sm text-gray-600 mb-2">Anomalies Detected</p>
+          <p className="text-3xl font-bold text-gray-900">
+            {analysisData.anomaly_findings?.length || 0}
+          </p>
+        </div>
+      </div>
+
+      <div className="border-t pt-6">
+        <h3 className="font-semibold mb-4">Key Findings</h3>
+        <ul className="space-y-2">
+          {analysisData.recommendations?.map((rec, index) => (
+            <li key={index} className="flex items-start">
+              <AlertTriangle className="w-5 h-5 text-yellow-500 mr-2 flex-shrink-0 mt-0.5" />
+              <span className="text-sm text-gray-700">{rec}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+};
+
+// Similarity Findings Component
+const SimilarityFindings = ({ findings }) => {
+  return (
+    <div className="space-y-4">
+      {findings.length === 0 ? (
+        <p className="text-gray-600">No similar papers found.</p>
+      ) : (
+        findings.map((finding, index) => (
+          <div key={index} className="border rounded-lg p-4 hover:bg-gray-50">
+            <div className="flex items-start justify-between">
+              <div>
+                <h4 className="font-medium">{finding.title}</h4>
+                <p className="text-sm text-gray-600 mt-1">{finding.authors?.join(', ')}</p>
+                <div className="flex items-center space-x-4 mt-2">
+                  <span className="text-xs text-gray-500">
+                    Text Similarity: {(finding.text_similarity * 100).toFixed(1)}%
+                  </span>
+                  <span className="text-xs text-gray-500">
+                    Semantic Similarity: {(finding.semantic_similarity * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+              <div className="text-right">
+                <span className="text-lg font-bold text-indigo-600">
+                  {(finding.overall_similarity * 100).toFixed(1)}%
+                </span>
+                <p className="text-xs text-gray-500 mt-1">Overall Match</p>
+              </div>
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+};
+
+// Anomaly Findings Component
+const AnomalyFindings = ({ findings }) => {
+  const getSeverityColor = (severity) => {
+    switch(severity) {
+      case 'critical': return 'text-red-600 bg-red-100';
+      case 'high': return 'text-orange-600 bg-orange-100';
+      case 'medium': return 'text-yellow-600 bg-yellow-100';
+      case 'low': return 'text-blue-600 bg-blue-100';
+      default: return 'text-gray-600 bg-gray-100';
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {findings.length === 0 ? (
+        <p className="text-gray-600">No anomalies detected.</p>
+      ) : (
+        findings.map((anomaly, index) => (
+          <div key={index} className="border rounded-lg p-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="flex items-center space-x-2">
+                  <span className={`px-2 py-1 text-xs font-medium rounded-full ${getSeverityColor(anomaly.severity)}`}>
+                    {anomaly.severity.toUpperCase()}
+                  </span>
+                  <span className="font-medium">{anomaly.type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
+                </div>
+                <p className="text-sm text-gray-700 mt-2">{anomaly.description}</p>
+              </div>
+              <div className="text-right">
+                <span className="text-sm text-gray-500">
+                  Confidence: {(anomaly.confidence * 100).toFixed(0)}%
+                </span>
+              </div>
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+};
+
+// Recommendations Component
+const Recommendations = ({ recommendations }) => {
+  return (
+    <div className="space-y-4">
+      {recommendations.length === 0 ? (
+        <p className="text-gray-600">No specific recommendations at this time.</p>
+      ) : (
+        <div className="space-y-3">
+          {recommendations.map((rec, index) => (
+            <div key={index} className="flex items-start space-x-3">
+              <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-gray-700">{rec}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Reports Section Component
+const ReportsSection = ({ papers }) => {
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-xl font-bold mb-6">Generate Reports</h2>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="border rounded-lg p-6 hover:border-indigo-500 transition-colors cursor-pointer">
+            <FileText className="w-12 h-12 text-indigo-600 mb-4" />
+            <h3 className="font-semibold mb-2">Institutional Report</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Comprehensive analysis of all papers from your institution
+            </p>
+            <button className="text-indigo-600 font-medium text-sm">
+              Generate Report →
+            </button>
+          </div>
+
+          <div className="border rounded-lg p-6 hover:border-indigo-500 transition-colors cursor-pointer">
+            <TrendingUp className="w-12 h-12 text-indigo-600 mb-4" />
+            <h3 className="font-semibold mb-2">Trend Analysis</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Identify patterns and trends in academic integrity issues
+            </p>
+            <button className="text-indigo-600 font-medium text-sm">
+              View Trends →
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Recent Reports */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="px-6 py-4 border-b">
+          <h3 className="font-semibold">Recent Reports</h3>
+        </div>
+        <div className="divide-y">
+          {[
+            { name: 'Q4 2024 Integrity Report', date: '2024-12-01', type: 'Quarterly' },
+            { name: 'Computer Science Department Review', date: '2024-11-15', type: 'Department' },
+            { name: 'High Risk Papers Summary', date: '2024-11-10', type: 'Risk Analysis' }
+          ].map((report, index) => (
+            <div key={index} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50">
+              <div className="flex items-center space-x-3">
+                <FileText className="w-5 h-5 text-gray-400" />
+                <div>
+                  <p className="font-medium">{report.name}</p>
+                  <p className="text-sm text-gray-600">{report.type} • {report.date}</p>
+                </div>
+              </div>
+              <button className="text-indigo-600 hover:text-indigo-800">
+                <Download className="w-5 h-5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Risk Badge Component
+const RiskBadge = ({ score }) => {
+  const getRiskLevel = () => {
+    if (score >= 0.7) return { label: 'High', color: 'bg-red-100 text-red-700' };
+    if (score >= 0.4) return { label: 'Medium', color: 'bg-yellow-100 text-yellow-700' };
+    return { label: 'Low', color: 'bg-green-100 text-green-700' };
+  };
+
+  const risk = getRiskLevel();
+
+  return (
+    <span className={`px-2 py-1 text-xs font-medium rounded-full ${risk.color}`}>
+      {risk.label} Risk
+    </span>
+  );
+};
+
+// Risk Meter Component
+const RiskMeter = ({ score }) => {
+  const percentage = score * 100;
+  const rotation = (percentage / 100) * 180 - 90;
+
+  return (
+    <div className="flex items-center space-x-4">
+      <div className="relative w-32 h-16">
+        <svg className="w-32 h-16" viewBox="0 0 120 60">
+          <path
+            d="M 10 60 A 50 50 0 0 1 110 60"
+            fill="none"
+            stroke="#e5e7eb"
+            strokeWidth="8"
+          />
+          <path
+            d="M 10 60 A 50 50 0 0 1 110 60"
+            fill="none"
+            stroke={percentage > 70 ? '#dc2626' : percentage > 40 ? '#f59e0b' : '#10b981'}
+            strokeWidth="8"
+            strokeDasharray={`${percentage * 1.57} 157`}
+          />
+        </svg>
+        <div className="absolute inset-0 flex items-end justify-center pb-2">
+          <span className="text-2xl font-bold">{percentage.toFixed(1)}%</span>
+        </div>
+      </div>
+      <div>
+        <p className="text-sm text-gray-600">Risk Score</p>
+        <p className="font-semibold">
+          {score >= 0.7 ? 'High Risk' : score >= 0.4 ? 'Medium Risk' : 'Low Risk'}
+        </p>
+      </div>
+    </div>
+  );
+};
+
+export default AcademicIntegrityPlatform;
