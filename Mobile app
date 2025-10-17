@@ -1,0 +1,1437 @@
+ Mobile Application for Academic Integrity Platform
+React Native App for iOS and Android
+App.tsx
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  View,
+  ScrollView,
+  TouchableOpacity,
+  TextInput,
+  ActivityIndicator,
+  RefreshControl,
+  Platform,
+  Alert,
+  StatusBar,
+  Dimensions,
+  FlatList,
+  Modal,
+  Animated,
+  KeyboardAvoidingView,
+} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
+import NetInfo from '@react-native-community/netinfo';
+import { Camera } from 'expo-camera';
+import * as LocalAuthentication from 'expo-local-authentication';
+import { LinearGradient } from 'expo-linear-gradient';
+import Icon from 'react-native-vector-icons/MaterialIcons';
+import PushNotification from 'react-native-push-notification';
+import { LineChart, BarChart, PieChart } from 'react-native-chart-kit';
+
+const { width, height } = Dimensions.get('window');
+
+// ============= TYPES & INTERFACES =============
+
+interface Paper {
+  id: string;
+  title: string;
+  authors: string[];
+  risk_score: number;
+  status: 'pending' | 'processing' | 'completed';
+  submitted_date: string;
+  local?: boolean;
+}
+
+interface Notification {
+  id: string;
+  title: string;
+  body: string;
+  data: any;
+  timestamp: string;
+  read: boolean;
+}
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  institution: string;
+  role: 'reviewer' | 'admin' | 'researcher';
+}
+
+// ============= CONFIGURATION =============
+
+const API_BASE_URL = 'https://api.academic-integrity.com';
+const COLORS = {
+  primary: '#4F46E5',
+  secondary: '#10B981',
+  danger: '#EF4444',
+  warning: '#F59E0B',
+  background: '#F9FAFB',
+  card: '#FFFFFF',
+  text: '#111827',
+  textLight: '#6B7280',
+  border: '#E5E7EB',
+};
+
+// ============= NOTIFICATION SETUP =============
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
+// Configure push notifications
+PushNotification.configure({
+  onRegister: function (token) {
+    console.log('TOKEN:', token);
+  },
+  onNotification: function (notification) {
+    console.log('NOTIFICATION:', notification);
+  },
+  permissions: {
+    alert: true,
+    badge: true,
+    sound: true,
+  },
+  popInitialNotification: true,
+  requestPermissions: true,
+});
+
+// ============= API SERVICE =============
+
+class APIService {
+  static async request(endpoint: string, options: any = {}) {
+    const token = await AsyncStorage.getItem('auth_token');
+    
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': token ? `Bearer ${token}` : '',
+        ...options.headers,
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error(`API Error: ${response.status}`);
+    }
+    
+    return response.json();
+  }
+  
+  static async uploadPaper(file: any) {
+    const formData = new FormData();
+    formData.append('file', {
+      uri: file.uri,
+      type: file.type,
+      name: file.name,
+    } as any);
+    
+    return this.request('/api/papers/upload', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+      body: formData,
+    });
+  }
+  
+  static async getPapers(status?: string) {
+    const query = status ? `?status=${status}` : '';
+    return this.request(`/api/papers${query}`);
+  }
+  
+  static async getAnalysis(paperId: string) {
+    return this.request(`/api/papers/${paperId}/analysis`);
+  }
+}
+
+// ============= OFFLINE STORAGE =============
+
+class OfflineStorage {
+  static async savePaper(paper: Paper) {
+    const papers = await this.getPapers();
+    papers.push({ ...paper, local: true });
+    await AsyncStorage.setItem('offline_papers', JSON.stringify(papers));
+  }
+  
+  static async getPapers(): Promise<Paper[]> {
+    const data = await AsyncStorage.getItem('offline_papers');
+    return data ? JSON.parse(data) : [];
+  }
+  
+  static async syncPapers() {
+    const papers = await this.getPapers();
+    const localPapers = papers.filter(p => p.local);
+    
+    for (const paper of localPapers) {
+      try {
+        await APIService.uploadPaper(paper);
+        // Remove local flag after successful upload
+        paper.local = false;
+      } catch (error) {
+        console.error('Failed to sync paper:', error);
+      }
+    }
+    
+    await AsyncStorage.setItem('offline_papers', JSON.stringify(papers));
+  }
+  
+  static async clearCache() {
+    await AsyncStorage.removeItem('offline_papers');
+  }
+}
+
+// ============= MAIN APP COMPONENT =============
+
+const App = () => {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [papers, setPapers] = useState<Paper[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [isOnline, setIsOnline] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(-100)).current;
+  
+  useEffect(() => {
+    initializeApp();
+    setupNotifications();
+    checkNetworkStatus();
+    
+    // Animations
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 1000,
+        useNativeDriver: true,
+      }),
+      Animated.spring(slideAnim, {
+        toValue: 0,
+        friction: 8,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, []);
+  
+  const initializeApp = async () => {
+    // Check authentication
+    const token = await AsyncStorage.getItem('auth_token');
+    if (token) {
+      await authenticateWithBiometrics();
+    }
+    
+    // Load cached data
+    const cachedPapers = await OfflineStorage.getPapers();
+    setPapers(cachedPapers);
+    
+    // Fetch fresh data if online
+    if (isOnline) {
+      await fetchPapers();
+    }
+  };
+  
+  const authenticateWithBiometrics = async () => {
+    const hasHardware = await LocalAuthentication.hasHardwareAsync();
+    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+    
+    if (hasHardware && isEnrolled) {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Authenticate to access Academic Integrity',
+        fallbackLabel: 'Use passcode',
+        cancelLabel: 'Cancel',
+      });
+      
+      if (result.success) {
+        setIsAuthenticated(true);
+        loadUserData();
+      }
+    } else {
+      // Fallback to regular auth
+      setIsAuthenticated(true);
+      loadUserData();
+    }
+  };
+  
+  const loadUserData = async () => {
+    const userData = await AsyncStorage.getItem('user_data');
+    if (userData) {
+      setUser(JSON.parse(userData));
+    }
+  };
+  
+  const setupNotifications = async () => {
+    const { status } = await Notifications.requestPermissionsAsync();
+    
+    if (status === 'granted') {
+      const token = await Notifications.getExpoPushTokenAsync();
+      console.log('Push token:', token);
+      
+      // Register token with backend
+      // await APIService.registerPushToken(token.data);
+    }
+    
+    // Listen for notifications
+    const subscription = Notifications.addNotificationReceivedListener(notification => {
+      handleNewNotification(notification);
+    });
+    
+    return () => subscription.remove();
+  };
+  
+  const handleNewNotification = (notification: any) => {
+    const newNotification: Notification = {
+      id: Date.now().toString(),
+      title: notification.request.content.title || '',
+      body: notification.request.content.body || '',
+      data: notification.request.content.data,
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+    
+    setNotifications(prev => [newNotification, ...prev]);
+    
+    // Show local notification if app is in foreground
+    PushNotification.localNotification({
+      title: newNotification.title,
+      message: newNotification.body,
+      playSound: true,
+      soundName: 'default',
+    });
+  };
+  
+  const checkNetworkStatus = () => {
+    const unsubscribe = NetInfo.addEventListener(state => {
+      setIsOnline(state.isConnected || false);
+      
+      if (state.isConnected) {
+        // Sync offline data when connection restored
+        OfflineStorage.syncPapers();
+      }
+    });
+    
+    return () => unsubscribe();
+  };
+  
+  const fetchPapers = async () => {
+    setLoading(true);
+    try {
+      const data = await APIService.getPapers();
+      setPapers(data.results || []);
+      
+      // Cache for offline access
+      await AsyncStorage.setItem('offline_papers', JSON.stringify(data.results || []));
+    } catch (error) {
+      Alert.alert('Error', 'Failed to fetch papers');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchPapers();
+    setRefreshing(false);
+  };
+  
+  const handleDocumentPick = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: 'application/pdf',
+      copyToCacheDirectory: true,
+    });
+    
+    if (result.type === 'success') {
+      if (isOnline) {
+        await uploadPaper(result);
+      } else {
+        // Save for offline processing
+        await OfflineStorage.savePaper({
+          id: Date.now().toString(),
+          title: result.name,
+          authors: [],
+          risk_score: 0,
+          status: 'pending',
+          submitted_date: new Date().toISOString(),
+          local: true,
+        });
+        Alert.alert('Saved', 'Paper saved for upload when online');
+      }
+    }
+  };
+  
+  const uploadPaper = async (file: any) => {
+    setLoading(true);
+    try {
+      const response = await APIService.uploadPaper(file);
+      Alert.alert('Success', 'Paper uploaded successfully');
+      await fetchPapers();
+    } catch (error) {
+      Alert.alert('Error', 'Failed to upload paper');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (!isAuthenticated) {
+    return <LoginScreen onLogin={() => setIsAuthenticated(true)} />;
+  }
+  
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
+      
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Academic Integrity</Text>
+        <View style={styles.headerIcons}>
+          <TouchableOpacity onPress={() => setActiveTab('notifications')}>
+            <Icon name="notifications" size={24} color={COLORS.text} />
+            {notifications.filter(n => !n.read).length > 0 && (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>
+                  {notifications.filter(n => !n.read).length}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity style={{ marginLeft: 15 }}>
+            <Icon name="person" size={24} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+      </View>
+      
+      {/* Network Status Bar */}
+      {!isOnline && (
+        <View style={styles.offlineBar}>
+          <Icon name="wifi-off" size={16} color="#fff" />
+          <Text style={styles.offlineText}>Offline Mode</Text>
+        </View>
+      )}
+      
+      {/* Main Content */}
+      <Animated.View
+        style={[
+          styles.content,
+          {
+            opacity: fadeAnim,
+            transform: [{ translateY: slideAnim }],
+          },
+        ]}
+      >
+        {activeTab === 'dashboard' && (
+          <DashboardTab papers={papers} onRefresh={onRefresh} refreshing={refreshing} />
+        )}
+        {activeTab === 'papers' && (
+          <PapersTab
+            papers={papers}
+            onUpload={handleDocumentPick}
+            loading={loading}
+            onRefresh={onRefresh}
+            refreshing={refreshing}
+          />
+        )}
+        {activeTab === 'analysis' && <AnalysisTab papers={papers} />}
+        {activeTab === 'notifications' && (
+          <NotificationsTab
+            notifications={notifications}
+            onMarkAsRead={(id) => {
+              setNotifications(prev =>
+                prev.map(n => (n.id === id ? { ...n, read: true } : n))
+              );
+            }}
+          />
+        )}
+      </Animated.View>
+      
+      {/* Bottom Navigation */}
+      <View style={styles.bottomNav}>
+        {['dashboard', 'papers', 'analysis', 'notifications'].map(tab => (
+          <TouchableOpacity
+            key={tab}
+            style={styles.navItem}
+            onPress={() => setActiveTab(tab)}
+          >
+            <Icon
+              name={
+                tab === 'dashboard'
+                  ? 'dashboard'
+                  : tab === 'papers'
+                  ? 'description'
+                  : tab === 'analysis'
+                  ? 'analytics'
+                  : 'notifications'
+              }
+              size={24}
+              color={activeTab === tab ? COLORS.primary : COLORS.textLight}
+            />
+            <Text
+              style={[
+                styles.navText,
+                activeTab === tab && styles.navTextActive,
+              ]}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </SafeAreaView>
+  );
+};
+
+// ============= TAB COMPONENTS =============
+
+const DashboardTab = ({ papers, onRefresh, refreshing }: any) => {
+  const getRiskColor = (score: number) => {
+    if (score >= 0.7) return COLORS.danger;
+    if (score >= 0.4) return COLORS.warning;
+    return COLORS.secondary;
+  };
+  
+  const stats = {
+    total: papers.length,
+    highRisk: papers.filter((p: Paper) => p.risk_score >= 0.7).length,
+    pending: papers.filter((p: Paper) => p.status === 'pending').length,
+    completed: papers.filter((p: Paper) => p.status === 'completed').length,
+  };
+  
+  const chartData = {
+    labels: ['Low', 'Medium', 'High'],
+    datasets: [
+      {
+        data: [
+          papers.filter((p: Paper) => p.risk_score < 0.4).length,
+          papers.filter((p: Paper) => p.risk_score >= 0.4 && p.risk_score < 0.7).length,
+          papers.filter((p: Paper) => p.risk_score >= 0.7).length,
+        ],
+      },
+    ],
+  };
+  
+  return (
+    <ScrollView
+      style={styles.tabContent}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+      }
+    >
+      <Text style={styles.sectionTitle}>Overview</Text>
+      
+      {/* Statistics Cards */}
+      <View style={styles.statsGrid}>
+        <View style={[styles.statCard, { backgroundColor: COLORS.primary }]}>
+          <Text style={styles.statValue}>{stats.total}</Text>
+          <Text style={styles.statLabel}>Total Papers</Text>
+        </View>
+        <View style={[styles.statCard, { backgroundColor: COLORS.danger }]}>
+          <Text style={styles.statValue}>{stats.highRisk}</Text>
+          <Text style={styles.statLabel}>High Risk</Text>
+        </View>
+        <View style={[styles.statCard, { backgroundColor: COLORS.warning }]}>
+          <Text style={styles.statValue}>{stats.pending}</Text>
+          <Text style={styles.statLabel}>Pending</Text>
+        </View>
+        <View style={[styles.statCard, { backgroundColor: COLORS.secondary }]}>
+          <Text style={styles.statValue}>{stats.completed}</Text>
+          <Text style={styles.statLabel}>Completed</Text>
+        </View>
+      </View>
+      
+      {/* Chart */}
+      <View style={styles.chartContainer}>
+        <Text style={styles.chartTitle}>Risk Distribution</Text>
+        {papers.length > 0 && (
+          <BarChart
+            data={chartData}
+            width={width - 40}
+            height={200}
+            yAxisLabel=""
+            yAxisSuffix=""
+            chartConfig={{
+              backgroundColor: COLORS.card,
+              backgroundGradientFrom: COLORS.card,
+              backgroundGradientTo: COLORS.card,
+              decimalPlaces: 0,
+              color: (opacity = 1) => `rgba(79, 70, 229, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(107, 114, 128, ${opacity})`,
+              style: {
+                borderRadius: 16,
+              },
+              propsForDots: {
+                r: '6',
+                strokeWidth: '2',
+                stroke: COLORS.primary,
+              },
+            }}
+            style={{
+              marginVertical: 8,
+              borderRadius: 16,
+            }}
+          />
+        )}
+      </View>
+      
+      {/* Recent Papers */}
+      <Text style={styles.sectionTitle}>Recent Papers</Text>
+      {papers.slice(0, 5).map((paper: Paper) => (
+        <View key={paper.id} style={styles.paperCard}>
+          <View style={styles.paperHeader}>
+            <Text style={styles.paperTitle} numberOfLines={2}>
+              {paper.title}
+            </Text>
+            <View
+              style={[
+                styles.riskBadge,
+                { backgroundColor: getRiskColor(paper.risk_score) },
+              ]}
+            >
+              <Text style={styles.riskBadgeText}>
+                {(paper.risk_score * 100).toFixed(0)}%
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.paperAuthors}>
+            {paper.authors.join(', ')}
+          </Text>
+          <View style={styles.paperFooter}>
+            <Text style={styles.paperDate}>
+              {new Date(paper.submitted_date).toLocaleDateString()}
+            </Text>
+            <Text style={styles.paperStatus}>{paper.status}</Text>
+          </View>
+        </View>
+      ))}
+    </ScrollView>
+  );
+};
+
+const PapersTab = ({ papers, onUpload, loading, onRefresh, refreshing }: any) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterStatus, setFilterStatus] = useState('all');
+  
+  const filteredPapers = papers.filter((paper: Paper) => {
+    const matchesSearch = paper.title.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesFilter = filterStatus === 'all' || paper.status === filterStatus;
+    return matchesSearch && matchesFilter;
+  });
+  
+  const renderPaper = ({ item }: { item: Paper }) => (
+    <TouchableOpacity style={styles.paperListItem}>
+      <View style={styles.paperListContent}>
+        <Text style={styles.paperListTitle} numberOfLines={2}>
+          {item.title}
+        </Text>
+        <Text style={styles.paperListAuthors} numberOfLines={1}>
+          {item.authors.join(', ')}
+        </Text>
+        <View style={styles.paperListMeta}>
+          <Text style={styles.paperListDate}>
+            {new Date(item.submitted_date).toLocaleDateString()}
+          </Text>
+          {item.local && (
+            <View style={styles.localBadge}>
+              <Icon name="cloud-off" size={16} color={COLORS.warning} />
+              <Text style={styles.localBadgeText}>Local</Text>
+            </View>
+          )}
+        </View>
+      </View>
+      <View style={styles.paperListRight}>
+        <View
+          style={[
+            styles.riskIndicator,
+            {
+              backgroundColor:
+                item.risk_score >= 0.7
+                  ? COLORS.danger
+                  : item.risk_score >= 0.4
+                  ? COLORS.warning
+                  : COLORS.secondary,
+            },
+          ]}
+        >
+          <Text style={styles.riskIndicatorText}>
+            {(item.risk_score * 100).toFixed(0)}%
+          </Text>
+        </View>
+        <Icon
+          name="chevron-right"
+          size={24}
+          color={COLORS.textLight}
+          style={{ marginTop: 10 }}
+        />
+      </View>
+    </TouchableOpacity>
+  );
+  
+  return (
+    <View style={styles.tabContent}>
+      {/* Search and Filter */}
+      <View style={styles.searchContainer}>
+        <View style={styles.searchBar}>
+          <Icon name="search" size={20} color={COLORS.textLight} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search papers..."
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholderTextColor={COLORS.textLight}
+          />
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar}>
+          {['all', 'pending', 'processing', 'completed'].map(status => (
+            <TouchableOpacity
+              key={status}
+              style={[
+                styles.filterChip,
+                filterStatus === status && styles.filterChipActive,
+              ]}
+              onPress={() => setFilterStatus(status)}
+            >
+              <Text
+                style={[
+                  styles.filterChipText,
+                  filterStatus === status && styles.filterChipTextActive,
+                ]}
+              >
+                {status.charAt(0).toUpperCase() + status.slice(1)}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+      
+      {/* Upload Button */}
+      <TouchableOpacity style={styles.uploadButton} onPress={onUpload}>
+        <LinearGradient
+          colors={[COLORS.primary, '#6366F1']}
+          style={styles.uploadButtonGradient}
+        >
+          <Icon name="cloud-upload" size={24} color="#fff" />
+          <Text style={styles.uploadButtonText}>Upload Paper</Text>
+        </LinearGradient>
+      </TouchableOpacity>
+      
+      {/* Papers List */}
+      {loading ? (
+        <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 50 }} />
+      ) : (
+        <FlatList
+          data={filteredPapers}
+          renderItem={renderPaper}
+          keyExtractor={item => item.id}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+          }
+          ListEmptyComponent={
+            <Text style={styles.emptyText}>No papers found</Text>
+          }
+          contentContainerStyle={{ paddingBottom: 100 }}
+        />
+      )}
+    </View>
+  );
+};
+
+const AnalysisTab = ({ papers }: any) => {
+  const [selectedPaper, setSelectedPaper] = useState<Paper | null>(null);
+  const [analysisData, setAnalysisData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  
+  const loadAnalysis = async (paper: Paper) => {
+    setLoading(true);
+    setSelectedPaper(paper);
+    
+    try {
+      const data = await APIService.getAnalysis(paper.id);
+      setAnalysisData(data);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to load analysis');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (selectedPaper && analysisData) {
+    return (
+      <ScrollView style={styles.tabContent}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => {
+            setSelectedPaper(null);
+            setAnalysisData(null);
+          }}
+        >
+          <Icon name="arrow-back" size={24} color={COLORS.text} />
+          <Text style={styles.backButtonText}>Back to Papers</Text>
+        </TouchableOpacity>
+        
+        <Text style={styles.analysisTitle}>{selectedPaper.title}</Text>
+        
+        {/* Risk Score */}
+        <View style={styles.riskScoreContainer}>
+          <Text style={styles.riskScoreLabel}>Overall Risk Score</Text>
+          <View style={styles.riskScoreCircle}>
+            <Text style={styles.riskScoreValue}>
+              {(analysisData.risk_score * 100).toFixed(0)}%
+            </Text>
+          </View>
+        </View>
+        
+        {/* Findings */}
+        <Text style={styles.sectionTitle}>Key Findings</Text>
+        {analysisData.findings?.map((finding: any, index: number) => (
+          <View key={index} style={styles.findingCard}>
+            <Icon
+              name={
+                finding.severity === 'high'
+                  ? 'error'
+                  : finding.severity === 'medium'
+                  ? 'warning'
+                  : 'info'
+              }
+              size={24}
+              color={
+                finding.severity === 'high'
+                  ? COLORS.danger
+                  : finding.severity === 'medium'
+                  ? COLORS.warning
+                  : COLORS.primary
+              }
+            />
+            <View style={styles.findingContent}>
+              <Text style={styles.findingType}>{finding.type}</Text>
+              <Text style={styles.findingDescription}>{finding.description}</Text>
+            </View>
+          </View>
+        ))}
+        
+        {/* Recommendations */}
+        <Text style={styles.sectionTitle}>Recommendations</Text>
+        {analysisData.recommendations?.map((rec: string, index: number) => (
+          <View key={index} style={styles.recommendationItem}>
+            <Icon name="check-circle" size={20} color={COLORS.secondary} />
+            <Text style={styles.recommendationText}>{rec}</Text>
+          </View>
+        ))}
+      </ScrollView>
+    );
+  }
+  
+  return (
+    <ScrollView style={styles.tabContent}>
+      <Text style={styles.sectionTitle}>Select Paper for Analysis</Text>
+      {papers.filter((p: Paper) => p.status === 'completed').map((paper: Paper) => (
+        <TouchableOpacity
+          key={paper.id}
+          style={styles.analysisCard}
+          onPress={() => loadAnalysis(paper)}
+        >
+          <View style={styles.analysisCardContent}>
+            <Text style={styles.analysisCardTitle}>{paper.title}</Text>
+            <Text style={styles.analysisCardAuthors}>
+              {paper.authors.join(', ')}
+            </Text>
+          </View>
+          <Icon name="arrow-forward" size={24} color={COLORS.primary} />
+        </TouchableOpacity>
+      ))}
+      
+      {loading && (
+        <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 50 }} />
+      )}
+    </ScrollView>
+  );
+};
+
+const NotificationsTab = ({ notifications, onMarkAsRead }: any) => {
+  return (
+    <FlatList
+      data={notifications}
+      keyExtractor={item => item.id}
+      renderItem={({ item }) => (
+        <TouchableOpacity
+          style={[
+            styles.notificationItem,
+            !item.read && styles.notificationUnread,
+          ]}
+          onPress={() => onMarkAsRead(item.id)}
+        >
+          <View style={styles.notificationIcon}>
+            <Icon
+              name="notifications"
+              size={24}
+              color={!item.read ? COLORS.primary : COLORS.textLight}
+            />
+          </View>
+          <View style={styles.notificationContent}>
+            <Text style={styles.notificationTitle}>{item.title}</Text>
+            <Text style={styles.notificationBody}>{item.body}</Text>
+            <Text style={styles.notificationTime}>
+              {new Date(item.timestamp).toLocaleString()}
+            </Text>
+          </View>
+        </TouchableOpacity>
+      )}
+      ListEmptyComponent={
+        <Text style={styles.emptyText}>No notifications</Text>
+      }
+    />
+  );
+};
+
+const LoginScreen = ({ onLogin }: any) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  
+  const handleLogin = async () => {
+    // Mock login
+    await AsyncStorage.setItem('auth_token', 'mock_token');
+    await AsyncStorage.setItem(
+      'user_data',
+      JSON.stringify({
+        id: '1',
+        name: 'John Doe',
+        email: email,
+        institution: 'Demo University',
+        role: 'reviewer',
+      })
+    );
+    onLogin();
+  };
+  
+  return (
+    <SafeAreaView style={styles.loginContainer}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.loginContent}
+      >
+        <View style={styles.loginHeader}>
+          <Icon name="shield" size={60} color={COLORS.primary} />
+          <Text style={styles.loginTitle}>Academic Integrity</Text>
+          <Text style={styles.loginSubtitle}>Mobile Reviewer</Text>
+        </View>
+        
+        <View style={styles.loginForm}>
+          <TextInput
+            style={styles.loginInput}
+            placeholder="Email"
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholderTextColor={COLORS.textLight}
+          />
+          <TextInput
+            style={styles.loginInput}
+            placeholder="Password"
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry
+            placeholderTextColor={COLORS.textLight}
+          />
+          
+          <TouchableOpacity style={styles.loginButton} onPress={handleLogin}>
+            <LinearGradient
+              colors={[COLORS.primary, '#6366F1']}
+              style={styles.loginButtonGradient}
+            >
+              <Text style={styles.loginButtonText}>Login</Text>
+            </LinearGradient>
+          </TouchableOpacity>
+          
+          <TouchableOpacity>
+            <Text style={styles.forgotPassword}>Forgot Password?</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+};
+
+// ============= STYLES =============
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: COLORS.text,
+  },
+  headerIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  badge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    backgroundColor: COLORS.danger,
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  offlineBar: {
+    backgroundColor: COLORS.warning,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 5,
+  },
+  offlineText: {
+    color: '#fff',
+    marginLeft: 5,
+    fontSize: 12,
+  },
+  content: {
+    flex: 1,
+  },
+  tabContent: {
+    flex: 1,
+    padding: 20,
+  },
+  bottomNav: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.card,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingBottom: Platform.OS === 'ios' ? 20 : 10,
+  },
+  navItem: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  navText: {
+    fontSize: 11,
+    color: COLORS.textLight,
+    marginTop: 4,
+  },
+  navTextActive: {
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginBottom: 15,
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginHorizontal: -5,
+    marginBottom: 20,
+  },
+  statCard: {
+    width: (width - 50) / 2,
+    padding: 15,
+    margin: 5,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  statValue: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  statLabel: {
+    fontSize: 12,
+    color: '#fff',
+    opacity: 0.9,
+    marginTop: 5,
+  },
+  chartContainer: {
+    backgroundColor: COLORS.card,
+    padding: 20,
+    borderRadius: 15,
+    marginBottom: 20,
+  },
+  chartTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 10,
+  },
+  paperCard: {
+    backgroundColor: COLORS.card,
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  paperHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  paperTitle: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginRight: 10,
+  },
+  paperAuthors: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    marginTop: 5,
+  },
+  paperFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  paperDate: {
+    fontSize: 11,
+    color: COLORS.textLight,
+  },
+  paperStatus: {
+    fontSize: 11,
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  riskBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  riskBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  searchContainer: {
+    marginBottom: 20,
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.card,
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  searchInput: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 14,
+    color: COLORS.text,
+  },
+  filterBar: {
+    maxHeight: 40,
+  },
+  filterChip: {
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: COLORS.card,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  filterChipActive: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  filterChipText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+  },
+  filterChipTextActive: {
+    color: '#fff',
+  },
+  uploadButton: {
+    marginBottom: 20,
+  },
+  uploadButtonGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 15,
+    borderRadius: 10,
+  },
+  uploadButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 10,
+  },
+  paperListItem: {
+    backgroundColor: COLORS.card,
+    flexDirection: 'row',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  paperListContent: {
+    flex: 1,
+  },
+  paperListTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  paperListAuthors: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    marginTop: 5,
+  },
+  paperListMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  paperListDate: {
+    fontSize: 11,
+    color: COLORS.textLight,
+  },
+  localBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 10,
+  },
+  localBadgeText: {
+    fontSize: 11,
+    color: COLORS.warning,
+    marginLeft: 3,
+  },
+  paperListRight: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  riskIndicator: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  riskIndicatorText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  emptyText: {
+    textAlign: 'center',
+    color: COLORS.textLight,
+    marginTop: 50,
+    fontSize: 14,
+  },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  backButtonText: {
+    marginLeft: 10,
+    fontSize: 14,
+    color: COLORS.text,
+  },
+  analysisTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginBottom: 20,
+  },
+  riskScoreContainer: {
+    alignItems: 'center',
+    marginBottom: 30,
+  },
+  riskScoreLabel: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginBottom: 10,
+  },
+  riskScoreCircle: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  riskScoreValue: {
+    fontSize: 36,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  findingCard: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.card,
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  findingContent: {
+    flex: 1,
+    marginLeft: 15,
+  },
+  findingType: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 5,
+  },
+  findingDescription: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    lineHeight: 18,
+  },
+  recommendationItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 15,
+  },
+  recommendationText: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 13,
+    color: COLORS.text,
+    lineHeight: 20,
+  },
+  analysisCard: {
+    backgroundColor: COLORS.card,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  analysisCardContent: {
+    flex: 1,
+  },
+  analysisCardTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  analysisCardAuthors: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    marginTop: 5,
+  },
+  notificationItem: {
+    flexDirection: 'row',
+    padding: 15,
+    backgroundColor: COLORS.card,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  notificationUnread: {
+    backgroundColor: '#F0F9FF',
+  },
+  notificationIcon: {
+    marginRight: 15,
+  },
+  notificationContent: {
+    flex: 1,
+  },
+  notificationTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 5,
+  },
+  notificationBody: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginBottom: 5,
+  },
+  notificationTime: {
+    fontSize: 11,
+    color: COLORS.textLight,
+  },
+  loginContainer: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  loginContent: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: 30,
+  },
+  loginHeader: {
+    alignItems: 'center',
+    marginBottom: 40,
+  },
+  loginTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginTop: 15,
+  },
+  loginSubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginTop: 5,
+  },
+  loginForm: {
+    marginBottom: 30,
+  },
+  loginInput: {
+    backgroundColor: COLORS.card,
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+    borderRadius: 10,
+    fontSize: 14,
+    color: COLORS.text,
+    marginBottom: 15,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  loginButton: {
+    marginTop: 10,
+  },
+  loginButtonGradient: {
+    paddingVertical: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  loginButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  forgotPassword: {
+    textAlign: 'center',
+    color: COLORS.primary,
+    fontSize: 14,
+    marginTop: 20,
+  },
+});
+
+export default App;
