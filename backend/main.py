@@ -20,7 +20,8 @@ from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
 
 # Configuration
-DATABASE_URL = "postgresql://user:password@localhost/academic_integrity"
+import os
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://aiplatform:secure_password@postgres:5432/academic_integrity")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -56,7 +57,7 @@ class Paper(Base):
     doi = Column(String, unique=True)
     arxiv_id = Column(String)
     pdf_hash = Column(String, unique=True)
-    metadata = Column(JSON)
+    paper_metadata = Column(JSON)
 
     # Extracted features
     embeddings = Column(JSON)  # Store document embeddings

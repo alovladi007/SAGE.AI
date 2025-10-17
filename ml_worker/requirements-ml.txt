@@ -30,7 +30,7 @@ scipy==1.11.4
 pytesseract==0.3.10
 
 # Image processing
-opencv-python==4.8.1
+opencv-python==4.8.1.78
 Pillow==10.1.0
 scikit-image==0.22.0
 imagehash==4.3.1
@@ -41,7 +41,7 @@ pdfplumber==0.10.3
 PyMuPDF==1.23.7
 
 # Other dependencies
-redis==5.0.1
+redis==4.6.0
 celery==5.3.4
 httpx==0.25.1
 python-dotenv==1.0.0

@@ -94,7 +94,7 @@ class Paper(Base):
     submitted_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Metadata
-    metadata = Column(JSON, nullable=True)
+    paper_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -261,7 +261,7 @@ class ProcessingJob(Base):
     error_message = Column(Text, nullable=True)
 
     result = Column(JSON, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    job_metadata = Column(JSON, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

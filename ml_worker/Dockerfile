@@ -25,9 +25,8 @@ COPY requirements-ml.txt .
 RUN pip install --no-cache-dir -r requirements-ml.txt
 
 # Download ML models
-RUN python -c "from sentence_transformers import SentenceTransformer; \
-    model = SentenceTransformer('allenai/specter2'); \
-    model.save('/app/models/specter2')"
+RUN mkdir -p /app/models && \
+    python -c "from transformers import AutoModel, AutoTokenizer; AutoModel.from_pretrained('allenai/specter2_base'); AutoTokenizer.from_pretrained('allenai/specter2_base')"
 
 # Copy application code
 COPY . .
