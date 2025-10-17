@@ -1,0 +1,47 @@
+# ML specific dependencies
+torch==2.1.0
+torchvision==0.16.0
+torchaudio==2.1.0
+
+# Advanced ML
+faiss-cpu==1.7.4
+lightgbm==4.1.0
+xgboost==2.0.2
+catboost==1.2.2
+
+# NLP models
+transformers==4.35.0
+sentence-transformers==2.2.2
+spacy==3.7.2
+nltk==3.8.1
+
+# Computer vision
+albumentations==1.3.1
+timm==0.9.10
+
+# Scientific computing
+numba==0.58.1
+scikit-learn==1.3.2
+numpy==1.24.3
+pandas==2.1.3
+scipy==1.11.4
+
+# OCR
+pytesseract==0.3.10
+
+# Image processing
+opencv-python==4.8.1
+Pillow==10.1.0
+scikit-image==0.22.0
+imagehash==4.3.1
+
+# PDF processing
+PyPDF2==3.0.1
+pdfplumber==0.10.3
+PyMuPDF==1.23.7
+
+# Other dependencies
+redis==5.0.1
+celery==5.3.4
+httpx==0.25.1
+python-dotenv==1.0.0

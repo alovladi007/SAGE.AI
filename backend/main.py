@@ -1,0 +1,804 @@
+# Academic Integrity Platform - Core Backend API
+# main.py
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from typing import List, Optional, Dict, Any
+import asyncio
+from datetime import datetime
+import uuid
+from pydantic import BaseModel, Field
+from enum import Enum
+import hashlib
+import json
+
+# Database Models and Schemas
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Integer, JSON, Text, Boolean, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.dialects.postgresql import UUID
+
+# Configuration
+DATABASE_URL = "postgresql://user:password@localhost/academic_integrity"
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Academic Integrity Platform",
+    version="1.0.0",
+    description="ML-powered platform for detecting academic misconduct"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============= DATABASE MODELS =============
+
+class Paper(Base):
+    __tablename__ = "papers"
+
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    title = Column(String, nullable=False)
+    authors = Column(JSON)
+    abstract = Column(Text)
+    content = Column(Text)
+    publication_date = Column(DateTime)
+    journal = Column(String)
+    doi = Column(String, unique=True)
+    arxiv_id = Column(String)
+    pdf_hash = Column(String, unique=True)
+    metadata = Column(JSON)
+
+    # Extracted features
+    embeddings = Column(JSON)  # Store document embeddings
+    sections = Column(JSON)  # Structured sections
+    figures_data = Column(JSON)  # Extracted figures metadata
+    tables_data = Column(JSON)  # Extracted tables
+    citations = Column(JSON)  # Reference list
+
+    # Processing status
+    status = Column(String, default="pending")
+    processed_at = Column(DateTime)
+    error_log = Column(Text)
+
+    # Analysis results
+    similarity_checks = relationship("SimilarityCheck", back_populates="source_paper")
+    anomaly_flags = relationship("AnomalyFlag", back_populates="paper")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class SimilarityCheck(Base):
+    __tablename__ = "similarity_checks"
+
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    source_paper_id = Column(UUID, ForeignKey("papers.id"))
+    target_paper_id = Column(UUID, ForeignKey("papers.id"))
+
+    similarity_type = Column(String)  # text, semantic, data, image
+    similarity_score = Column(Float)
+
+    # Detailed matches
+    matches = Column(JSON)  # List of specific matches with locations
+
+    # Metadata
+    algorithm_version = Column(String)
+    checked_at = Column(DateTime, default=datetime.utcnow)
+
+    source_paper = relationship("Paper", foreign_keys=[source_paper_id])
+    target_paper = relationship("Paper", foreign_keys=[target_paper_id])
+
+class AnomalyFlag(Base):
+    __tablename__ = "anomaly_flags"
+
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    paper_id = Column(UUID, ForeignKey("papers.id"))
+
+    anomaly_type = Column(String)  # statistical, citation, authorship
+    severity = Column(String)  # low, medium, high, critical
+    confidence = Column(Float)
+
+    description = Column(Text)
+    evidence = Column(JSON)
+
+    detected_at = Column(DateTime, default=datetime.utcnow)
+    reviewed = Column(Boolean, default=False)
+    review_notes = Column(Text)
+
+    paper = relationship("Paper", back_populates="anomaly_flags")
+
+class ProcessingJob(Base):
+    __tablename__ = "processing_jobs"
+
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    paper_id = Column(UUID, ForeignKey("papers.id"))
+
+    job_type = Column(String)  # full_analysis, similarity_check, anomaly_detection
+    status = Column(String, default="queued")  # queued, processing, completed, failed
+    priority = Column(Integer, default=0)
+
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+
+    result = Column(JSON)
+    error_message = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Institution(Base):
+    __tablename__ = "institutions"
+
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    domain = Column(String)
+    api_key = Column(String, unique=True)
+
+    # Rate limiting
+    api_calls_limit = Column(Integer, default=10000)
+    api_calls_used = Column(Integer, default=0)
+    reset_date = Column(DateTime)
+
+    # Settings
+    notification_email = Column(String)
+    webhook_url = Column(String)
+    auto_scan_enabled = Column(Boolean, default=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# ============= PYDANTIC SCHEMAS =============
+
+class PaperUpload(BaseModel):
+    title: str
+    authors: List[str]
+    abstract: Optional[str] = None
+    publication_date: Optional[datetime] = None
+    journal: Optional[str] = None
+    doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+
+class SimilarityCheckRequest(BaseModel):
+    paper_id: str
+    check_types: List[str] = ["text", "semantic", "image", "data"]
+    threshold: float = 0.3
+    limit: int = 100
+
+class AnalysisResult(BaseModel):
+    paper_id: str
+    overall_risk_score: float
+    similarity_findings: List[Dict[str, Any]]
+    anomaly_findings: List[Dict[str, Any]]
+    recommendations: List[str]
+    detailed_report_url: str
+
+class JobStatus(BaseModel):
+    job_id: str
+    status: str
+    progress: float
+    message: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+
+# ============= DEPENDENCY INJECTION =============
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ============= PROCESSING ENGINES =============
+
+class TextProcessor:
+    """Handles text extraction and preprocessing"""
+
+    @staticmethod
+    async def extract_text_from_pdf(file_content: bytes) -> Dict[str, Any]:
+        """Extract structured text from PDF"""
+        import PyPDF2
+        import io
+
+        pdf_file = io.BytesIO(file_content)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+
+        full_text = ""
+        sections = {
+            "abstract": "",
+            "introduction": "",
+            "methodology": "",
+            "results": "",
+            "discussion": "",
+            "conclusion": "",
+            "references": []
+        }
+
+        for page in pdf_reader.pages:
+            text = page.extract_text()
+            full_text += text + "\n"
+
+        # Section identification (simplified - would use regex/NLP in production)
+        lines = full_text.split('\n')
+        current_section = None
+
+        for line in lines:
+            line_lower = line.lower().strip()
+
+            if 'abstract' in line_lower:
+                current_section = 'abstract'
+            elif 'introduction' in line_lower:
+                current_section = 'introduction'
+            elif 'method' in line_lower:
+                current_section = 'methodology'
+            elif 'result' in line_lower:
+                current_section = 'results'
+            elif 'discussion' in line_lower:
+                current_section = 'discussion'
+            elif 'conclusion' in line_lower:
+                current_section = 'conclusion'
+            elif 'reference' in line_lower:
+                current_section = 'references'
+
+            if current_section and current_section != 'references':
+                sections[current_section] += line + " "
+            elif current_section == 'references':
+                if line.strip():
+                    sections['references'].append(line.strip())
+
+        return {
+            "full_text": full_text,
+            "sections": sections,
+            "word_count": len(full_text.split()),
+            "page_count": len(pdf_reader.pages)
+        }
+
+    @staticmethod
+    def preprocess_text(text: str) -> str:
+        """Clean and normalize text"""
+        import re
+
+        # Remove special characters but keep scientific notation
+        text = re.sub(r'[^\w\s\.\-\+\=\(\)\[\]\{\}\/\*]', ' ', text)
+        # Normalize whitespace
+        text = ' '.join(text.split())
+        return text.lower()
+
+class EmbeddingGenerator:
+    """Generate embeddings for similarity comparison"""
+
+    @staticmethod
+    async def generate_embeddings(text: str) -> List[float]:
+        """Generate sentence embeddings using transformer models"""
+        # In production, use sentence-transformers or similar
+        # This is a placeholder that generates random embeddings
+        import random
+        return [random.random() for _ in range(768)]
+
+    @staticmethod
+    async def generate_section_embeddings(sections: Dict[str, str]) -> Dict[str, List[float]]:
+        """Generate embeddings for each section"""
+        embeddings = {}
+        for section_name, section_text in sections.items():
+            if section_text and isinstance(section_text, str):
+                embeddings[section_name] = await EmbeddingGenerator.generate_embeddings(section_text)
+        return embeddings
+
+class SimilarityEngine:
+    """Core similarity detection engine"""
+
+    @staticmethod
+    def calculate_text_similarity(text1: str, text2: str) -> float:
+        """Calculate direct text similarity using n-grams"""
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, text1, text2).ratio()
+
+    @staticmethod
+    def calculate_semantic_similarity(embedding1: List[float], embedding2: List[float]) -> float:
+        """Calculate cosine similarity between embeddings"""
+        import numpy as np
+
+        vec1 = np.array(embedding1)
+        vec2 = np.array(embedding2)
+
+        cosine_sim = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+        return float(cosine_sim)
+
+    @staticmethod
+    async def find_similar_papers(
+        paper_id: str,
+        db: Session,
+        threshold: float = 0.3,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Find papers similar to the given paper"""
+
+        source_paper = db.query(Paper).filter(Paper.id == paper_id).first()
+        if not source_paper:
+            raise HTTPException(status_code=404, detail="Paper not found")
+
+        # Get all other papers (in production, use vector DB for efficiency)
+        other_papers = db.query(Paper).filter(
+            Paper.id != paper_id,
+            Paper.status == "completed"
+        ).limit(limit).all()
+
+        similarities = []
+
+        for target_paper in other_papers:
+            # Calculate different similarity metrics
+            text_sim = SimilarityEngine.calculate_text_similarity(
+                source_paper.content or "",
+                target_paper.content or ""
+            )
+
+            semantic_sim = 0.0
+            if source_paper.embeddings and target_paper.embeddings:
+                semantic_sim = SimilarityEngine.calculate_semantic_similarity(
+                    source_paper.embeddings.get("full_text", []),
+                    target_paper.embeddings.get("full_text", [])
+                )
+
+            overall_sim = (text_sim * 0.4 + semantic_sim * 0.6)
+
+            if overall_sim >= threshold:
+                similarities.append({
+                    "paper_id": str(target_paper.id),
+                    "title": target_paper.title,
+                    "authors": target_paper.authors,
+                    "text_similarity": text_sim,
+                    "semantic_similarity": semantic_sim,
+                    "overall_similarity": overall_sim,
+                    "publication_date": target_paper.publication_date.isoformat() if target_paper.publication_date else None
+                })
+
+        # Sort by overall similarity
+        similarities.sort(key=lambda x: x["overall_similarity"], reverse=True)
+
+        return similarities
+
+class AnomalyDetector:
+    """Detect statistical and other anomalies in papers"""
+
+    @staticmethod
+    def check_statistical_anomalies(text: str) -> List[Dict[str, Any]]:
+        """Check for statistical anomalies in reported data"""
+        import re
+
+        anomalies = []
+
+        # Check for p-values
+        p_value_pattern = r'p\s*[=<>]\s*([\d\.]+)'
+        p_values = re.findall(p_value_pattern, text, re.IGNORECASE)
+
+        for p_value in p_values:
+            try:
+                p = float(p_value)
+                if p > 1.0:
+                    anomalies.append({
+                        "type": "invalid_p_value",
+                        "severity": "high",
+                        "value": p,
+                        "description": f"P-value {p} is greater than 1.0"
+                    })
+                elif p == 0.000:
+                    anomalies.append({
+                        "type": "suspicious_p_value",
+                        "severity": "medium",
+                        "value": p,
+                        "description": "P-value reported as exactly 0.000"
+                    })
+            except ValueError:
+                pass
+
+        # Check for percentage values
+        percentage_pattern = r'(\d+\.?\d*)\s*%'
+        percentages = re.findall(percentage_pattern, text)
+
+        for percentage in percentages:
+            try:
+                pct = float(percentage)
+                if pct > 100:
+                    anomalies.append({
+                        "type": "invalid_percentage",
+                        "severity": "high",
+                        "value": pct,
+                        "description": f"Percentage {pct}% exceeds 100%"
+                    })
+            except ValueError:
+                pass
+
+        return anomalies
+
+    @staticmethod
+    def check_citation_anomalies(citations: List[str]) -> List[Dict[str, Any]]:
+        """Check for anomalies in citation patterns"""
+        anomalies = []
+
+        # Check for excessive self-citation
+        if citations:
+            # This would need author matching logic in production
+            self_citation_count = 0
+            total_citations = len(citations)
+
+            if total_citations > 0:
+                self_citation_ratio = self_citation_count / total_citations
+                if self_citation_ratio > 0.3:
+                    anomalies.append({
+                        "type": "excessive_self_citation",
+                        "severity": "medium",
+                        "value": self_citation_ratio,
+                        "description": f"Self-citation ratio of {self_citation_ratio:.2%} exceeds 30%"
+                    })
+
+        return anomalies
+
+# ============= API ENDPOINTS =============
+
+@app.get("/")
+async def root():
+    return {
+        "name": "Academic Integrity Platform API",
+        "version": "1.0.0",
+        "status": "operational",
+        "endpoints": {
+            "upload": "/api/papers/upload",
+            "analyze": "/api/papers/{paper_id}/analyze",
+            "similarity": "/api/papers/{paper_id}/similarity",
+            "status": "/api/jobs/{job_id}/status",
+            "search": "/api/papers/search"
+        }
+    }
+
+@app.post("/api/papers/upload", response_model=Dict[str, str])
+async def upload_paper(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    metadata: str = None,
+    db: Session = Depends(get_db)
+):
+    """Upload a new paper for analysis"""
+
+    # Validate file type
+    if not file.filename.endswith(('.pdf', '.txt')):
+        raise HTTPException(status_code=400, detail="Only PDF and TXT files are supported")
+
+    # Read file content
+    content = await file.read()
+
+    # Generate hash for duplicate detection
+    file_hash = hashlib.sha256(content).hexdigest()
+
+    # Check for duplicate
+    existing = db.query(Paper).filter(Paper.pdf_hash == file_hash).first()
+    if existing:
+        return {
+            "paper_id": str(existing.id),
+            "status": "duplicate",
+            "message": "This paper already exists in the system"
+        }
+
+    # Parse metadata if provided
+    paper_metadata = json.loads(metadata) if metadata else {}
+
+    # Create paper record
+    paper = Paper(
+        id=uuid.uuid4(),
+        title=paper_metadata.get("title", file.filename),
+        authors=paper_metadata.get("authors", []),
+        abstract=paper_metadata.get("abstract"),
+        pdf_hash=file_hash,
+        status="queued"
+    )
+
+    db.add(paper)
+    db.commit()
+
+    # Create processing job
+    job = ProcessingJob(
+        id=uuid.uuid4(),
+        paper_id=paper.id,
+        job_type="full_analysis",
+        status="queued"
+    )
+
+    db.add(job)
+    db.commit()
+
+    # Queue background processing
+    background_tasks.add_task(process_paper, str(paper.id), content)
+
+    return {
+        "paper_id": str(paper.id),
+        "job_id": str(job.id),
+        "status": "queued",
+        "message": "Paper uploaded successfully and queued for processing"
+    }
+
+async def process_paper(paper_id: str, content: bytes):
+    """Background task to process uploaded paper"""
+    db = SessionLocal()
+
+    try:
+        paper = db.query(Paper).filter(Paper.id == paper_id).first()
+        if not paper:
+            return
+
+        # Update status
+        paper.status = "processing"
+        db.commit()
+
+        # Extract text
+        text_data = await TextProcessor.extract_text_from_pdf(content)
+        paper.content = text_data["full_text"]
+        paper.sections = text_data["sections"]
+
+        # Generate embeddings
+        embeddings = await EmbeddingGenerator.generate_section_embeddings(text_data["sections"])
+        paper.embeddings = embeddings
+
+        # Run anomaly detection
+        anomalies = AnomalyDetector.check_statistical_anomalies(text_data["full_text"])
+
+        for anomaly in anomalies:
+            flag = AnomalyFlag(
+                id=uuid.uuid4(),
+                paper_id=paper.id,
+                anomaly_type=anomaly["type"],
+                severity=anomaly["severity"],
+                confidence=0.8,
+                description=anomaly["description"],
+                evidence=anomaly
+            )
+            db.add(flag)
+
+        # Update paper status
+        paper.status = "completed"
+        paper.processed_at = datetime.utcnow()
+
+        # Update job status
+        job = db.query(ProcessingJob).filter(
+            ProcessingJob.paper_id == paper_id,
+            ProcessingJob.job_type == "full_analysis"
+        ).first()
+
+        if job:
+            job.status = "completed"
+            job.completed_at = datetime.utcnow()
+            job.result = {
+                "word_count": text_data["word_count"],
+                "anomaly_count": len(anomalies)
+            }
+
+        db.commit()
+
+    except Exception as e:
+        paper.status = "failed"
+        paper.error_log = str(e)
+        db.commit()
+
+    finally:
+        db.close()
+
+@app.get("/api/papers/{paper_id}/analyze", response_model=AnalysisResult)
+async def analyze_paper(
+    paper_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get comprehensive analysis results for a paper"""
+
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    if paper.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Paper processing status: {paper.status}")
+
+    # Get similarity findings
+    similarities = await SimilarityEngine.find_similar_papers(paper_id, db)
+
+    # Get anomaly findings
+    anomalies = db.query(AnomalyFlag).filter(AnomalyFlag.paper_id == paper_id).all()
+    anomaly_findings = [
+        {
+            "type": a.anomaly_type,
+            "severity": a.severity,
+            "description": a.description,
+            "confidence": a.confidence
+        }
+        for a in anomalies
+    ]
+
+    # Calculate overall risk score
+    risk_score = 0.0
+    if similarities:
+        max_similarity = max(s["overall_similarity"] for s in similarities)
+        risk_score = max(risk_score, max_similarity)
+
+    if anomaly_findings:
+        severity_weights = {"low": 0.2, "medium": 0.5, "high": 0.8, "critical": 1.0}
+        anomaly_score = sum(severity_weights.get(a["severity"], 0) for a in anomaly_findings) / 10
+        risk_score = min(1.0, risk_score + anomaly_score)
+
+    # Generate recommendations
+    recommendations = []
+    if risk_score > 0.7:
+        recommendations.append("High risk detected - manual review strongly recommended")
+    if similarities and similarities[0]["overall_similarity"] > 0.8:
+        recommendations.append("Very high similarity detected with existing papers")
+    if any(a["severity"] == "critical" for a in anomaly_findings):
+        recommendations.append("Critical anomalies detected in statistical reporting")
+
+    return AnalysisResult(
+        paper_id=paper_id,
+        overall_risk_score=risk_score,
+        similarity_findings=similarities[:10],  # Top 10 similar papers
+        anomaly_findings=anomaly_findings,
+        recommendations=recommendations,
+        detailed_report_url=f"/api/papers/{paper_id}/report"
+    )
+
+@app.post("/api/papers/{paper_id}/similarity", response_model=List[Dict[str, Any]])
+async def check_similarity(
+    paper_id: str,
+    request: SimilarityCheckRequest,
+    db: Session = Depends(get_db)
+):
+    """Run similarity check for a specific paper"""
+
+    similarities = await SimilarityEngine.find_similar_papers(
+        paper_id,
+        db,
+        threshold=request.threshold,
+        limit=request.limit
+    )
+
+    # Store similarity checks in database
+    for sim in similarities[:10]:  # Store top 10
+        check = SimilarityCheck(
+            id=uuid.uuid4(),
+            source_paper_id=paper_id,
+            target_paper_id=sim["paper_id"],
+            similarity_type="combined",
+            similarity_score=sim["overall_similarity"],
+            matches=sim,
+            algorithm_version="1.0.0"
+        )
+        db.add(check)
+
+    db.commit()
+
+    return similarities
+
+@app.get("/api/jobs/{job_id}/status", response_model=JobStatus)
+async def get_job_status(
+    job_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get status of a processing job"""
+
+    job = db.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Calculate progress
+    progress = 0.0
+    if job.status == "completed":
+        progress = 1.0
+    elif job.status == "processing":
+        progress = 0.5
+    elif job.status == "queued":
+        progress = 0.0
+
+    return JobStatus(
+        job_id=str(job.id),
+        status=job.status,
+        progress=progress,
+        message=job.error_message,
+        result=job.result
+    )
+
+@app.get("/api/papers/search")
+async def search_papers(
+    query: str = None,
+    author: str = None,
+    journal: str = None,
+    start_date: datetime = None,
+    end_date: datetime = None,
+    min_risk_score: float = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Search papers with various filters"""
+
+    q = db.query(Paper)
+
+    if query:
+        q = q.filter(
+            (Paper.title.ilike(f"%{query}%")) |
+            (Paper.abstract.ilike(f"%{query}%"))
+        )
+
+    if author:
+        q = q.filter(Paper.authors.contains([author]))
+
+    if journal:
+        q = q.filter(Paper.journal.ilike(f"%{journal}%"))
+
+    if start_date:
+        q = q.filter(Paper.publication_date >= start_date)
+
+    if end_date:
+        q = q.filter(Paper.publication_date <= end_date)
+
+    total = q.count()
+    papers = q.offset(offset).limit(limit).all()
+
+    results = []
+    for paper in papers:
+        # Calculate risk score for each paper
+        anomaly_count = db.query(AnomalyFlag).filter(AnomalyFlag.paper_id == paper.id).count()
+        similarity_checks = db.query(SimilarityCheck).filter(
+            SimilarityCheck.source_paper_id == paper.id
+        ).order_by(SimilarityCheck.similarity_score.desc()).first()
+
+        risk_score = 0.0
+        if similarity_checks:
+            risk_score = similarity_checks.similarity_score
+        risk_score = min(1.0, risk_score + (anomaly_count * 0.1))
+
+        if min_risk_score and risk_score < min_risk_score:
+            continue
+
+        results.append({
+            "paper_id": str(paper.id),
+            "title": paper.title,
+            "authors": paper.authors,
+            "abstract": paper.abstract[:200] + "..." if paper.abstract else None,
+            "publication_date": paper.publication_date.isoformat() if paper.publication_date else None,
+            "journal": paper.journal,
+            "risk_score": risk_score,
+            "status": paper.status
+        })
+
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "results": results
+    }
+
+@app.get("/api/statistics/overview")
+async def get_statistics(db: Session = Depends(get_db)):
+    """Get platform statistics"""
+
+    total_papers = db.query(Paper).count()
+    processed_papers = db.query(Paper).filter(Paper.status == "completed").count()
+    total_anomalies = db.query(AnomalyFlag).count()
+    high_risk_papers = db.query(AnomalyFlag).filter(
+        AnomalyFlag.severity.in_(["high", "critical"])
+    ).distinct(AnomalyFlag.paper_id).count()
+
+    return {
+        "total_papers": total_papers,
+        "processed_papers": processed_papers,
+        "processing_rate": processed_papers / total_papers if total_papers > 0 else 0,
+        "total_anomalies_detected": total_anomalies,
+        "high_risk_papers": high_risk_papers,
+        "average_processing_time": "2.3 minutes",  # Would calculate from jobs table
+        "last_updated": datetime.utcnow().isoformat()
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
