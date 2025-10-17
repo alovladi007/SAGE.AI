@@ -1,0 +1,122 @@
+1. Detection Types
+
+Text similarity: Direct plagiarism, paraphrasing, idea appropriation
+Data fabrication: Statistical anomalies, impossible data patterns
+Image manipulation: Duplicated/altered figures, charts, microscopy images
+Citation networks: Missing attributions, citation rings
+Methodology copying: Experimental designs taken without credit
+
+2. Technical Architecture Considerations
+Data Pipeline:
+
+Ingestion: APIs (arXiv, PubMed, CrossRef, institutional repositories)
+Storage: Distributed systems (PostgreSQL + vector DB like Pinecone/Weaviate)
+Processing: Apache Spark for batch processing, Redis for caching
+Format handling: PDF parsing (PyMuPDF, pdfplumber), OCR for scanned docs
+
+ML Approaches:
+
+Embeddings: Use transformer models (SciBERT, Specter2) for semantic similarity
+Fingerprinting: MinHash/SimHash for quick approximate matching
+Graph analysis: Citation network analysis to detect suspicious patterns
+Statistical analysis: Benford's Law, GRIM test for data anomalies
+Computer vision: CNN-based image similarity detection
+
+Proposed System Architecture
+1. Document Ingestion Layer
+   ├── PDF/XML parsers
+   ├── Metadata extraction
+   └── Reference extraction
+
+2. Preprocessing Pipeline
+   ├── Text cleaning & normalization
+   ├── Section identification (abstract, methods, results)
+   ├── Figure/table extraction
+   └── Citation parsing
+
+3. Analysis Engines
+   ├── Semantic Similarity Engine
+   │   ├── Sentence embeddings
+   │   ├── Paragraph-level matching
+   │   └── Idea clustering
+   ├── Statistical Anomaly Detection
+   │   ├── Data consistency checks
+   │   └── Statistical test validation
+   ├── Image Analysis
+   │   ├── Duplicate detection
+   │   └── Manipulation detection
+   └── Network Analysis
+       ├── Citation patterns
+       └── Collaboration networks
+
+4. Scoring & Reporting
+   ├── Risk scoring algorithm
+   ├── Evidence compilation
+   └── Report generation
+Key Technical Decisions
+1. Similarity Detection Strategy
+
+Hybrid approach: Combine exact matching (for verbatim copying) with semantic similarity (for paraphrasing)
+Hierarchical matching: Document → Section → Paragraph → Sentence level
+Contextual analysis: Consider field-specific terminology and common phrases
+
+2. False Positive Reduction
+
+Whitelist common phrases/methodologies
+Account for self-citations and legitimate reuse
+Field-specific thresholds (some fields have more standardized language)
+Time-based analysis (who published first?)
+
+3. Scalability Solutions
+
+Indexing: Build inverted indices for full-text search
+Approximate algorithms: LSH (Locality Sensitive Hashing) for billions of comparisons
+Distributed processing: Hadoop/Spark clusters
+Incremental updates: Only process new papers against existing corpus
+
+Implementation Roadmap
+Phase 1: MVP (2-3 months)
+
+Basic text similarity detection using pre-trained embeddings
+Simple web interface for uploading papers
+Database of 10,000-50,000 papers for testing
+Basic reporting system
+
+Phase 2: Enhanced Detection (3-4 months)
+
+Add statistical anomaly detection
+Implement image similarity checking
+Scale to 500,000+ papers
+API for institutional integration
+
+Phase 3: Advanced Features (4-6 months)
+
+Citation network analysis
+Multi-language support
+Real-time monitoring of new publications
+Machine learning model fine-tuning on confirmed cases
+
+Unique Value Propositions to Consider
+
+Temporal tracking: Show how ideas evolve across papers over time
+Collaboration patterns: Identify suspicious authorship patterns
+Preprint monitoring: Catch issues before formal publication
+Educational mode: Help students check their own work before submission
+API service: Offer to journals, universities, funding agencies
+
+Ethical & Legal Considerations
+
+Privacy: Anonymization options for internal institutional checks
+Transparency: Explain how similarity scores are calculated
+Appeals process: System for disputing false positives
+Access rights: Ensure compliance with publisher agreements
+Bias mitigation: Test across different disciplines and geographic regions
+
+Technology Stack Recommendation
+
+Backend: Python (FastAPI), Go for high-performance services
+ML/NLP: PyTorch, Hugging Face Transformers, spaCy
+Databases: PostgreSQL, Elasticsearch, Redis, Pinecone
+Processing: Apache Spark, Celery for task queuing
+Frontend: React/Next.js with D3.js for visualizations
+Deployment: Kubernetes for orchestration, AWS/GCP for cloud
