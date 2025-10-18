@@ -114,11 +114,12 @@ services:
       - academic_network
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-  # ML Processing Worker
+  # ML Processing Worker (Celery)
   ml_worker:
     build:
-      context: ./ml_worker
+      context: ./backend
       dockerfile: Dockerfile
+    container_name: academic_integrity_ml_worker
     environment:
       DATABASE_URL: postgresql://${DB_USER:-aiplatform}:${DB_PASSWORD:-secure_password}@postgres:5432/${DB_NAME:-academic_integrity}
       REDIS_URL: redis://redis:6379
@@ -126,18 +127,19 @@ services:
       MINIO_ENDPOINT: minio:9000
       MODEL_CACHE_DIR: /app/models
       PYTHONUNBUFFERED: 1
+      C_FORCE_ROOT: "true"
     volumes:
-      - ./ml_worker:/app
+      - ./backend:/app
       - ml_models:/app/models
       - processing_temp:/tmp/processing
     depends_on:
-      - postgres
-      - redis
-      - elasticsearch
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - academic_network
-    command: celery -A ml_tasks worker --loglevel=info --concurrency=2
+    command: celery -A celery_tasks worker --loglevel=info --concurrency=2 --max-tasks-per-child=50
 
   # Celery Beat Scheduler
   celery_beat:
@@ -148,11 +150,15 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-aiplatform}:${DB_PASSWORD:-secure_password}@postgres:5432/${DB_NAME:-academic_integrity}
       REDIS_URL: redis://redis:6379
+      PYTHONUNBUFFERED: 1
+      C_FORCE_ROOT: "true"
     volumes:
       - ./backend:/app
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - academic_network
     command: celery -A celery_app beat --loglevel=info

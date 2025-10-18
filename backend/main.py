@@ -206,14 +206,32 @@ class TextProcessor:
 
     @staticmethod
     async def extract_text_from_pdf(file_content: bytes) -> Dict[str, Any]:
-        """Extract structured text from PDF"""
+        """Extract structured text from PDF or TXT"""
         import PyPDF2
         import io
 
-        pdf_file = io.BytesIO(file_content)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-
         full_text = ""
+        page_count = 1
+
+        # Try to decode as text first
+        try:
+            full_text = file_content.decode('utf-8')
+            page_count = 1
+        except UnicodeDecodeError:
+            # If not text, try as PDF
+            try:
+                pdf_file = io.BytesIO(file_content)
+                pdf_reader = PyPDF2.PdfReader(pdf_file)
+
+                for page in pdf_reader.pages:
+                    text = page.extract_text()
+                    full_text += text + "\n"
+
+                page_count = len(pdf_reader.pages)
+
+            except Exception as e:
+                raise ValueError(f"Could not extract text from file: {str(e)}")
+
         sections = {
             "abstract": "",
             "introduction": "",
@@ -223,10 +241,6 @@ class TextProcessor:
             "conclusion": "",
             "references": []
         }
-
-        for page in pdf_reader.pages:
-            text = page.extract_text()
-            full_text += text + "\n"
 
         # Section identification (simplified - would use regex/NLP in production)
         lines = full_text.split('\n')
@@ -260,7 +274,7 @@ class TextProcessor:
             "full_text": full_text,
             "sections": sections,
             "word_count": len(full_text.split()),
-            "page_count": len(pdf_reader.pages)
+            "page_count": page_count
         }
 
     @staticmethod
@@ -515,8 +529,24 @@ async def upload_paper(
     db.add(job)
     db.commit()
 
-    # Queue background processing using sync wrapper
-    background_tasks.add_task(process_paper_wrapper, str(paper.id), content)
+    # Queue Celery task for background processing
+    try:
+        from celery_tasks import process_paper_task
+        import base64
+
+        # Encode content to base64 for Celery serialization
+        content_b64 = base64.b64encode(content).decode('utf-8')
+
+        # Send task to Celery worker
+        task = process_paper_task.delay(str(paper.id), content_b64)
+
+        # Store Celery task ID in job
+        job.result = {"celery_task_id": task.id}
+        db.commit()
+
+    except ImportError:
+        # Fallback to old method if Celery not available
+        background_tasks.add_task(process_paper_wrapper, str(paper.id), content)
 
     return {
         "paper_id": str(paper.id),
