@@ -117,3 +117,6 @@ dmypy.json
 
 # Credentials file (contains passwords)
 CREDENTIALS.md
+
+# Password file
+PASSWORDS.txt
