@@ -26,6 +26,8 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# Import auth models after Base is defined (will be imported later after User model is defined)
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Academic Integrity Platform",
@@ -135,6 +137,26 @@ class ProcessingJob(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    email = Column(String, unique=True, nullable=False, index=True)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String, nullable=False)
+    role = Column(String, default="user")  # user, reviewer, admin
+    institution = Column(String)
+
+    # Account status
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
+    verification_token = Column(String)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = Column(DateTime)
+
 class Institution(Base):
     __tablename__ = "institutions"
 
@@ -157,6 +179,11 @@ class Institution(Base):
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+# Import auth models and utilities (after User model is defined)
+from auth import UserCreate, UserLogin, UserResponse, Token, TokenData
+from auth import get_password_hash, verify_password, create_access_token, decode_access_token
+from auth import validate_password_strength, get_current_user, require_admin, require_reviewer
 
 # ============= PYDANTIC SCHEMAS =============
 
@@ -466,13 +493,141 @@ async def root():
         "version": "1.0.0",
         "status": "operational",
         "endpoints": {
-            "upload": "/api/papers/upload",
-            "analyze": "/api/papers/{paper_id}/analyze",
-            "similarity": "/api/papers/{paper_id}/similarity",
-            "status": "/api/jobs/{job_id}/status",
-            "search": "/api/papers/search"
+            "auth": {
+                "signup": "/api/auth/signup",
+                "login": "/api/auth/login",
+                "me": "/api/auth/me"
+            },
+            "papers": {
+                "upload": "/api/papers/upload",
+                "analyze": "/api/papers/{paper_id}/analyze",
+                "similarity": "/api/papers/{paper_id}/similarity",
+                "search": "/api/papers/search"
+            },
+            "jobs": {
+                "status": "/api/jobs/{job_id}/status"
+            }
         }
     }
+
+# ============= AUTHENTICATION ENDPOINTS =============
+
+@app.post("/api/auth/signup", response_model=Dict[str, Any])
+async def signup(user_data: UserCreate, db: Session = Depends(get_db)):
+    """Register a new user"""
+    from datetime import timedelta
+
+    # Validate password strength
+    is_valid, error_msg = validate_password_strength(user_data.password)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    # Check if user already exists
+    existing_user = db.query(User).filter(User.email == user_data.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Create new user
+    hashed_password = get_password_hash(user_data.password)
+    new_user = User(
+        id=uuid.uuid4(),
+        email=user_data.email,
+        hashed_password=hashed_password,
+        full_name=user_data.full_name,
+        institution=user_data.institution,
+        role="user",
+        is_active=True
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # Create access token
+    access_token_expires = timedelta(minutes=30)
+    access_token = create_access_token(
+        data={"sub": str(new_user.id), "email": new_user.email, "role": new_user.role},
+        expires_delta=access_token_expires
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(new_user.id),
+            "email": new_user.email,
+            "full_name": new_user.full_name,
+            "role": new_user.role
+        }
+    }
+
+
+@app.post("/api/auth/login", response_model=Dict[str, Any])
+async def login(credentials: UserLogin, db: Session = Depends(get_db)):
+    """Authenticate user and return JWT token"""
+    from datetime import timedelta
+
+    # Find user
+    user = db.query(User).filter(User.email == credentials.email).first()
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Check if user is active
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+
+    # Create access token
+    access_token_expires = timedelta(minutes=30)
+    access_token = create_access_token(
+        data={"sub": str(user.id), "email": user.email, "role": user.role},
+        expires_delta=access_token_expires
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": 1800,  # 30 minutes in seconds
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+            "institution": user.institution
+        }
+    }
+
+
+@app.get("/api/auth/me", response_model=Dict[str, Any])
+async def get_current_user_info(
+    current_user: TokenData = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get current user information"""
+    # Get full user details from database
+    user = db.query(User).filter(User.id == uuid.UUID(current_user.user_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "institution": user.institution,
+        "is_active": user.is_active,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "last_login": user.last_login.isoformat() if user.last_login else None
+    }
+
+# ============= PAPER ENDPOINTS =============
 
 @app.post("/api/papers/upload", response_model=Dict[str, str])
 async def upload_paper(
