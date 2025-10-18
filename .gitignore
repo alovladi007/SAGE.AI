@@ -114,3 +114,6 @@ secrets/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Credentials file (contains passwords)
+CREDENTIALS.md
