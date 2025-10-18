@@ -96,7 +96,7 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_USER:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_PASSWORD:-minioadmin123}
-      JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_here}
+      JWT_SECRET: ${JWT_SECRET}  # REQUIRED: Set in .env file - no default for security
       PYTHONUNBUFFERED: 1
     volumes:
       - ./backend:/app

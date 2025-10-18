@@ -14,8 +14,16 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 import os
 
-# Configuration
-SECRET_KEY = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+# Configuration - SECURITY: No default secrets in production
+SECRET_KEY = os.getenv("JWT_SECRET")
+if not SECRET_KEY:
+    raise ValueError(
+        "SECURITY ERROR: JWT_SECRET environment variable is not set!\n"
+        "Please set a strong secret key for JWT tokens.\n"
+        "Generate one with: openssl rand -hex 32\n"
+        "Then set: export JWT_SECRET=<generated-key>"
+    )
+
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
