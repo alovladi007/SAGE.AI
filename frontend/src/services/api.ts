@@ -4,7 +4,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 
 // API Configuration
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
 
 // Create axios instance with default config
 const apiClient: AxiosInstance = axios.create({
