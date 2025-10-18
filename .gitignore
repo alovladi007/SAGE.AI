@@ -120,3 +120,6 @@ CREDENTIALS.md
 
 # Password file
 PASSWORDS.txt
+
+# SSL certificates (do not commit)
+ssl/
